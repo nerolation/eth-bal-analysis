@@ -359,6 +359,9 @@ async def main():
             nonce_diffs=account_nonce_list,
         )
         block_al = ssz.encode(block_obj, sedes=BlockAccessList)
+        
+        with open(f"bal_raw/{block_number}_block_access_list.txt", "w") as f:
+            f.write(block_al.hex())
 
         # Get sizes (in KiB)
         storage_size = get_compressed_size(storage_diff)
