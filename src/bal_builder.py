@@ -23,9 +23,8 @@ IGNORE_STORAGE_LOCATIONS = False
 
 def extract_balances(state):
     return {
-        addr: bal
+        addr: parse_hex_or_zero(changes.get("balance"))
         for addr, changes in state.items()
-        if (bal := parse_hex_or_zero(changes.get("balance")))
     }
 
 
@@ -51,15 +50,21 @@ def get_deltas(tx_id, pres, posts, pre_balances, post_balances):
 
 
 def get_balance_delta(pres, posts, pre_balances, post_balances):
-    all_addresses = pres.intersection(posts)
-    balance_delta = {
-        addr: post_balances[addr] - pre_balances[addr] for addr in all_addresses
-    }
+    all_addresses = pres.union(posts)  # Use union instead of intersection
+    balance_delta = {}
+    for addr in all_addresses:
+        pre_balance = pre_balances.get(addr, 0)
+        post_balance = post_balances.get(addr, 0)
+        delta = post_balance - pre_balance
+        if delta != 0:  # Only include non-zero deltas
+            balance_delta[addr] = delta
     return balance_delta
 
 
 def get_balance_diff_from_block(trace_result):
-    acc_bal_diffs = []
+    # Aggregate all balance changes per address across the entire block
+    address_balance_changes: Dict[str, List[BalanceChange]] = {}
+    
     for tx_id, tx in enumerate(trace_result):
         tx_hash = tx.get("txHash")
         result = tx.get("result")
@@ -71,7 +76,18 @@ def get_balance_diff_from_block(trace_result):
         pre_balances, post_balances = parse_pre_and_post_balances(pre_state, post_state)
         pres, posts = set(pre_balances.keys()), set(post_balances.keys())
         acc_map = get_deltas(tx_id, pres, posts, pre_balances, post_balances)
-        acc_bal_diffs.extend(list(acc_map.values()))
+        
+        # Aggregate changes by address
+        for address, account_diff in acc_map.items():
+            if address not in address_balance_changes:
+                address_balance_changes[address] = []
+            address_balance_changes[address].extend(account_diff.changes)
+    
+    # Build final list of AccountBalanceDiff objects
+    acc_bal_diffs = []
+    for address, changes in address_balance_changes.items():
+        canonical = to_canonical_address(address)
+        acc_bal_diffs.append(AccountBalanceDiff(address=canonical, changes=changes))
 
     balance_diff = ssz.encode(acc_bal_diffs, sedes=BalanceDiffs)
     return balance_diff, acc_bal_diffs
@@ -125,7 +141,8 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
     Builds and SSZ‐encodes all AccountCodeDiff entries for the given trace_result.
     Returns an SSZ-encoded byte blob using `CodeDiffs` as the top-level sedes.
     """
-    acc_code_diffs: List[AccountCodeDiff] = []
+    # Aggregate all code changes per address across the entire block
+    address_code_changes: Dict[str, List[CodeChange]] = {}
 
     for tx_id, tx in enumerate(trace_result):
         tx_hash = tx.get("txHash")
@@ -144,7 +161,17 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
             post_code = extract_non_empty_code(post_state, address)
             process_code_change(tx_id, address, pre_code, post_code, acc_map)
 
-        acc_code_diffs.extend(acc_map.values())
+        # Aggregate changes by address
+        for address, account_diff in acc_map.items():
+            if address not in address_code_changes:
+                address_code_changes[address] = []
+            address_code_changes[address].extend(account_diff.changes)
+    
+    # Build final list of AccountCodeDiff objects
+    acc_code_diffs = []
+    for address, changes in address_code_changes.items():
+        canonical = to_canonical_address(address)
+        acc_code_diffs.append(AccountCodeDiff(address=canonical, changes=changes))
 
     return ssz.encode(acc_code_diffs, sedes=CodeDiffs), acc_code_diffs
 
@@ -206,7 +233,9 @@ def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
     Returns:
         A single SSZ‐encoded byte blob using `BlockAccessList` as the top-level sedes.
     """
-    per_address_slotaccesses: Dict[bytes, List[SlotAccess]] = {}
+    # Track all writes and reads across the entire block
+    block_writes: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
+    block_reads: Dict[str, Set[str]] = {}
 
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
@@ -215,9 +244,6 @@ def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
 
         pre_state = result.get("pre", {})
         post_state = result.get("post", {})
-
-        acc_map_write: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
-        acc_map_reads: Dict[str, Set[str]] = {}
 
         all_addresses = set(pre_state) | set(post_state)
 
@@ -238,22 +264,23 @@ def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
                     )
                     post_bytes = hex_to_bytes32(post_val)
                     if pre_bytes != post_bytes:
-                        _add_write(acc_map_write, address, slot, tx_id, post_val)
+                        _add_write(block_writes, address, slot, tx_id, post_val)
 
-                # If read-only
+                # If read-only (appears in pre but not modified in post)
                 elif _is_non_write_read(pre_val, post_val):
-                    if slot not in acc_map_write.get(address, {}):
-                        _add_read(acc_map_reads, address, slot)
+                    # Only add as read if this slot wasn't written to in this block
+                    if address not in block_writes or slot not in block_writes.get(address, {}):
+                        _add_read(block_reads, address, slot)
 
-        # Add slot accesses for this tx to the global per-address list
-        for address in set(acc_map_write) | set(acc_map_reads):
-            canonical = to_canonical_address(address)
-            if canonical not in per_address_slotaccesses:
-                per_address_slotaccesses[canonical] = []
-
-            per_address_slotaccesses[canonical].extend(
-                _build_slot_accesses(acc_map_write, acc_map_reads, address)
-            )
+    # Build the final account access list with proper aggregation
+    per_address_slotaccesses: Dict[bytes, List[SlotAccess]] = {}
+    
+    for address in set(block_writes.keys()) | set(block_reads.keys()):
+        canonical = to_canonical_address(address)
+        slot_accesses = _build_slot_accesses(block_writes, block_reads, address)
+        
+        if slot_accesses:
+            per_address_slotaccesses[canonical] = slot_accesses
 
     account_access_list = [
         AccountAccess(address=addr, accesses=slots)
@@ -340,41 +367,42 @@ def build_contract_nonce_diffs_from_state(
 
 
 def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessList:
-    def sort_account_accesses(account_accesses: AccountAccessList) -> AccountAccessList:
+    def sort_account_accesses(account_accesses):
         sorted_accounts = []
+        # account_accesses is a regular Python list
         for account in sorted(account_accesses, key=lambda a: bytes(a.address)):
             sorted_slots = []
+            # account.accesses is a regular Python list
             for slot_access in account.accesses:
-                # Make sure accesses is wrapped as SSZList
-                accesses_sorted = list(
-                    sorted(slot_access.accesses, key=lambda x: x.tx_index)
-                )
-                accesses_ssz = SSZList(accesses_sorted, MAX_TXS)
+                # Sort the per-tx accesses by tx_index
+                accesses_sorted = sorted(slot_access.accesses, key=lambda x: x.tx_index)
 
                 slot_access_sorted = SlotAccess(
-                    slot=slot_access.slot, accesses=accesses_ssz
+                    slot=slot_access.slot, accesses=accesses_sorted
                 )
                 sorted_slots.append(slot_access_sorted)
 
-            sorted_slots_ssz = SSZList(sorted_slots, MAX_SLOTS)
+            # Sort slots by slot key
+            sorted_slots = sorted(sorted_slots, key=lambda s: bytes(s.slot))
 
             account_sorted = AccountAccess(
-                address=account.address, accesses=sorted_slots_ssz
+                address=account.address, accesses=sorted_slots
             )
             sorted_accounts.append(account_sorted)
 
-        return SSZList(sorted_accounts, MAX_ACCOUNTS)
+        return sorted_accounts
 
     def sort_diffs(diffs, container_cls):
         sorted_accounts = []
+        # diffs is a regular Python list
         for account in sorted(diffs, key=lambda d: bytes(d.address)):
-            changes_sorted = list(sorted(account.changes, key=lambda x: x.tx_index))
-            changes_ssz = SSZList(changes_sorted, MAX_TXS)
+            # account.changes is a regular Python list
+            changes_sorted = sorted(account.changes, key=lambda x: x.tx_index)
 
-            account_sorted = container_cls(address=account.address, changes=changes_ssz)
+            account_sorted = container_cls(address=account.address, changes=changes_sorted)
             sorted_accounts.append(account_sorted)
 
-        return SSZList(sorted_accounts, MAX_ACCOUNTS)
+        return sorted_accounts
 
     return BlockAccessList(
         account_accesses=sort_account_accesses(block_access_list.account_accesses),

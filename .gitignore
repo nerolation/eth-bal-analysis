@@ -178,3 +178,11 @@ cython_debug/
 secrets.json
 .vscode/
 rpc.txt
+
+# Test results and debug files
+*.json
+bal_raw/
+debug_*.py
+comprehensive_test_results.json
+edge_case_results.json
+test_results.json
