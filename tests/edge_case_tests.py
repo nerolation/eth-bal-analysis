@@ -12,7 +12,7 @@ from typing import Dict, List, Any, Set, Tuple
 from collections import defaultdict
 
 # Add src to path
-project_root = str(Path(__file__).parent)
+project_root = str(Path(__file__).parent.parent)
 src_dir = os.path.join(project_root, "src")
 sys.path.insert(0, src_dir)
 
