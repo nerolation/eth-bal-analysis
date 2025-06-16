@@ -397,13 +397,11 @@ def main():
         trace_result = fetch_block_trace(block_number, RPC_URL)
 
         # Get diffs
-        storage_diff, account_access_list = get_storage_diff_from_block(
-            trace_result.copy()
-        )
-        balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result.copy())
-        code_diff, acc_code_diffs = get_code_diff_from_block(trace_result.copy())
+        storage_diff, account_access_list = get_storage_diff_from_block(trace_result)
+        balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result)
+        code_diff, acc_code_diffs = get_code_diff_from_block(trace_result)
         nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(
-            trace_result.copy()
+            trace_result
         )
 
         block_obj = BlockAccessList(
