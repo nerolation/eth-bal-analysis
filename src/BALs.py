@@ -24,12 +24,10 @@ BalanceDelta = ByteVector(12)
 Nonce = uint64
 Code = ByteList(MAX_CODE_SIZE)
 
-# Optional code type - we'll use a flag to indicate presence
-class OptionalCode(Serializable):
-    fields = [
-        ('has_code', uint8),  # Use uint8 instead of bool for SSZ compatibility
-        ('code', Code),
-    ]
+def parse_hex_or_zero(x):
+    if pd.isna(x) or x is None:
+        return 0
+    return int(x, 16)
 
 
 class PerTxAccess(Serializable):
@@ -52,28 +50,25 @@ class AccountAccess(Serializable):
         ('accesses', SSZList(SlotAccess, MAX_SLOTS)),
     ]
 
-BlockAccessList = SSZList(AccountAccess, MAX_ACCOUNTS)
+AccountAccessList = SSZList(AccountAccess, MAX_ACCOUNTS)
 
 def estimate_size_bytes(obj):
     return len(json.dumps(obj).encode('utf-8'))
 
 
-class SlotValue_postBlock(Serializable):
+class SlotValue(Serializable):
     fields = [
         ('slot', StorageKey),
         ('value', StorageValue),
     ]
 
-class AccountStorage_postBlock(Serializable):
+class AccountStorage(Serializable):
     fields = [
         ('address', Address),
-        ('slots', SSZList(SlotValue_postBlock, MAX_SLOTS)),
+        ('slots', SSZList(SlotValue, MAX_SLOTS)),
     ]
 
-PostBlockStorage = SSZList(AccountStorage_postBlock, MAX_ACCOUNTS)
-
-
-
+PostBlockStorage = SSZList(AccountStorage, MAX_ACCOUNTS)
 
 
 # BALANCE DIFF
@@ -91,12 +86,6 @@ class AccountBalanceDiff(Serializable):
     ]
 
 BalanceDiffs = SSZList(AccountBalanceDiff, MAX_ACCOUNTS)
-
-def parse_hex_or_zero(x):
-    if pd.isna(x) or x is None:
-        return 0
-    return int(x, 16)
-
 
 # NONCE DIFF
 class NonceChange(Serializable):
@@ -128,3 +117,11 @@ class AccountCodeDiff(Serializable):
 
 CodeDiffs = SSZList(AccountCodeDiff, MAX_ACCOUNTS)
 
+
+class BlockAccessList(Serializable):
+    fields = [
+        ('account_accesses', AccountAccessList),
+        ('balance_diffs',     BalanceDiffs),
+        ('code_diffs',        CodeDiffs),
+        ('nonce_diffs',       NonceDiffs),
+    ]

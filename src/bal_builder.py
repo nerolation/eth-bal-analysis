@@ -1,83 +1,26 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[ ]:
-
-
-import sys
 import os
-import aiohttp
+import sys
+import json
+import random
+import requests
 import asyncio
 import pandas as pd
-from typing import Tuple, List, Dict, Any, Optional
-import requests
-from web3 import Web3
 import pyarrow as pa
 import pyarrow.parquet as pq
-import json
-import aiohttp
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from web3 import Web3
+from eth_utils import to_canonical_address
+import ssz
 
 from BALs import *
+from helpers import *
 
-INFURA_URL = ""
-IGNORE_STORAGE_LOCATIONS = True
-
-async def get_block_state_diff(block_number_hex):
-    return {
-        "method": "debug_traceBlockByNumber",
-        "params": [
-            block_number_hex,
-            {
-                "tracer": "prestateTracer",
-                "tracerConfig": {
-                    "diffMode": True
-                }
-            }
-        ],
-        "id": 1,
-        "jsonrpc": "2.0"
-    }
-
-
-async def fetch_block_trace(block_number, rpc_url=INFURA_URL):
-    block_number_hex = hex(block_number)
-    payload = await get_block_state_diff(block_number_hex)
-    async with aiohttp.ClientSession() as session:
-        async with session.post(rpc_url, json=payload) as response:
-            data = await response.json()
-            if "error" in data:
-                raise Exception(f"RPC Error: {data['error']}")
-            return data["result"]
-        
-def parse_hex_or_zero(x):
-    if pd.isna(x) or x is None:
-        return 0
-    if isinstance(x, (int, float)):
-        return int(x)
-    if isinstance(x, str):
-        if x.startswith('0x'):
-            return int(x, 16)
-        else:
-            return int(x) if x.isdigit() else 0
-    return 0
-
-def get_compressed_size(obj, extra_data=None):
-    import snappy
+with open("../../rpc.txt", "r") as file:
+    RPC_URL = file.read().strip()
     
-    # Compress the main object
-    compressed_data = snappy.compress(obj)
-    compressed_size = len(compressed_data)
-    
-    # If extra data is provided (like contract code), compress that too
-    if extra_data:
-        for data in extra_data:
-            if data:
-                compressed_size += len(snappy.compress(data))
-    
-    return compressed_size / 1024
-
-
-# In[ ]:
+IGNORE_STORAGE_LOCATIONS = False
 
 
 def extract_balances(state):
@@ -130,11 +73,7 @@ def get_balance_diff_from_block(trace_result):
         acc_bal_diffs.extend(list(acc_map.values()))
 
     balance_diff = ssz.encode(acc_bal_diffs, sedes=BalanceDiffs)
-    return balance_diff
-
-
-
-# In[ ]:
+    return balance_diff, acc_bal_diffs
 
 
 def extract_non_empty_code(state: dict, address: str) -> Optional[str]:
@@ -207,19 +146,7 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
 
         acc_code_diffs.extend(acc_map.values())
 
-    return ssz.encode(acc_code_diffs, sedes=CodeDiffs)
-
-
-from typing import Dict, List, Set, Tuple, Optional
-from eth_utils import to_canonical_address
-import ssz
-
-
-def _hex_to_bytes32(hexstr: str) -> bytes:
-    """Convert a hex string like '0x...' into exactly 32 bytes (big‐endian)."""
-    no_pref = hexstr[2:] if hexstr.startswith("0x") else hexstr
-    raw = bytes.fromhex(no_pref)
-    return raw.rjust(32, b"\x00")
+    return ssz.encode(acc_code_diffs, sedes=CodeDiffs), acc_code_diffs
 
 
 def _is_non_write_read(pre_val_hex: Optional[str], post_val_hex: Optional[str]) -> bool:
@@ -255,9 +182,9 @@ def _build_slot_accesses(
 
     # Handle writes
     for slot_hex, write_entries in acc_map_write.get(address_hex, {}).items():
-        slot = _hex_to_bytes32(slot_hex)
+        slot = hex_to_bytes32(slot_hex)
         accesses = [
-            PerTxAccess(tx_index=tx_id, value_after=_hex_to_bytes32(val_hex))
+            PerTxAccess(tx_index=tx_id, value_after=hex_to_bytes32(val_hex))
             for tx_id, val_hex in write_entries
         ]
         slot_accesses.append(SlotAccess(slot=slot, accesses=accesses))
@@ -267,7 +194,7 @@ def _build_slot_accesses(
     for slot_hex in acc_map_reads.get(address_hex, set()):
         if slot_hex in written_slots:
             continue
-        slot = _hex_to_bytes32(slot_hex)
+        slot = hex_to_bytes32(slot_hex)
         slot_accesses.append(SlotAccess(slot=slot, accesses=[]))  # empty list → pure read
 
     return slot_accesses
@@ -306,8 +233,8 @@ def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
 
                 # If written (non-equal values or fresh write)
                 if post_val is not None:
-                    pre_bytes = _hex_to_bytes32(pre_val) if pre_val is not None else b"\x00" * 32
-                    post_bytes = _hex_to_bytes32(post_val)
+                    pre_bytes = hex_to_bytes32(pre_val) if pre_val is not None else b"\x00" * 32
+                    post_bytes = hex_to_bytes32(post_val)
                     if pre_bytes != post_bytes:
                         _add_write(acc_map_write, address, slot, tx_id, post_val)
 
@@ -332,15 +259,7 @@ def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
         if slots
     ]
 
-    return ssz.encode(account_access_list, sedes=BlockAccessList)
-
-
-# In[ ]:
-
-
-from typing import Dict, List, Tuple, Any
-from eth_utils import to_canonical_address
-import ssz
+    return ssz.encode(account_access_list, sedes=AccountAccessList), account_access_list
 
 
 def _get_nonce(info: dict, fallback: str = "0") -> int:
@@ -414,28 +333,6 @@ def build_contract_nonce_diffs_from_state(
     return encoded_bytes, account_nonce_list
 
 
-
-
-
-def count_accounts_and_slots(trace_result):
-    accounts_set = set()
-    total_slots = 0
-
-    for tx in trace_result:
-        post = tx.get("result", {}).get("post", {})
-        for addr, changes in post.items():
-            accounts_set.add(addr)
-            if "storage" in changes:
-                total_slots += len(changes["storage"])
-
-    return len(accounts_set), total_slots
-
-
-
-import random
-import json
-from collections import defaultdict
-
 async def main():
     totals = defaultdict(list)
     block_totals = []
@@ -446,13 +343,22 @@ async def main():
 
     for block_number in random_blocks:
         print(f"Processing block {block_number}...")
-        trace_result = await fetch_block_trace(block_number)
+        trace_result = fetch_block_trace(block_number, RPC_URL)
 
         # Get diffs
-        storage_diff = get_storage_diff_from_block(trace_result.copy())
-        balance_diff = get_balance_diff_from_block(trace_result.copy())
-        code_diff = get_code_diff_from_block(trace_result.copy())
-        nonce_diff, _ = build_contract_nonce_diffs_from_state(trace_result.copy())
+        storage_diff, account_access_list = get_storage_diff_from_block(trace_result.copy())
+        balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result.copy())
+        code_diff, acc_code_diffs = get_code_diff_from_block(trace_result.copy())
+        nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(trace_result.copy())
+        
+        
+        block_obj = BlockAccessList(
+            account_accesses=account_access_list,
+            balance_diffs=acc_bal_diffs,
+            code_diffs=acc_code_diffs,
+            nonce_diffs=account_nonce_list,
+        )
+        block_al = ssz.encode(block_obj, sedes=BlockAccessList)
 
         # Get sizes (in KiB)
         storage_size = get_compressed_size(storage_diff)
