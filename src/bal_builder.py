@@ -332,6 +332,55 @@ def build_contract_nonce_diffs_from_state(
     encoded_bytes = ssz.encode(account_nonce_list, sedes=NonceDiffs)
     return encoded_bytes, account_nonce_list
 
+def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessList:
+    def sort_account_accesses(account_accesses: AccountAccessList) -> AccountAccessList:
+        sorted_accounts = []
+        for account in sorted(account_accesses, key=lambda a: bytes(a.address)):
+            sorted_slots = []
+            for slot_access in account.accesses:
+                # Make sure accesses is wrapped as SSZList
+                accesses_sorted = list(sorted(slot_access.accesses, key=lambda x: x.tx_index))
+                accesses_ssz = SSZList(accesses_sorted, MAX_TXS)
+
+                slot_access_sorted = SlotAccess(
+                    slot=slot_access.slot,
+                    accesses=accesses_ssz
+                )
+                sorted_slots.append(slot_access_sorted)
+
+            sorted_slots_ssz = SSZList(sorted_slots, MAX_SLOTS)
+
+            account_sorted = AccountAccess(
+                address=account.address,
+                accesses=sorted_slots_ssz
+            )
+            sorted_accounts.append(account_sorted)
+
+        return SSZList(sorted_accounts, MAX_ACCOUNTS)
+
+    def sort_diffs(diffs, container_cls):
+        sorted_accounts = []
+        for account in sorted(diffs, key=lambda d: bytes(d.address)):
+            changes_sorted = list(sorted(account.changes, key=lambda x: x.tx_index))
+            changes_ssz = SSZList(changes_sorted, MAX_TXS)
+
+            account_sorted = container_cls(
+                address=account.address,
+                changes=changes_ssz
+            )
+            sorted_accounts.append(account_sorted)
+
+        return SSZList(sorted_accounts, MAX_ACCOUNTS)
+
+    return BlockAccessList(
+        account_accesses = sort_account_accesses(block_access_list.account_accesses),
+        balance_diffs    = sort_diffs(block_access_list.balance_diffs, AccountBalanceDiff),
+        code_diffs       = sort_diffs(block_access_list.code_diffs, AccountCodeDiff),
+        nonce_diffs      = sort_diffs(block_access_list.nonce_diffs, AccountNonceDiff),
+    )
+
+
+
 
 async def main():
     totals = defaultdict(list)
@@ -358,7 +407,10 @@ async def main():
             code_diffs=acc_code_diffs,
             nonce_diffs=account_nonce_list,
         )
-        block_al = ssz.encode(block_obj, sedes=BlockAccessList)
+        
+        block_obj_sorted = sort_block_access_list(block_obj)
+        
+        block_al = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
         
         with open(f"bal_raw/{block_number}_block_access_list.txt", "w") as f:
             f.write(block_al.hex())
