@@ -1,23 +1,21 @@
 import os
+import ssz
 import sys
 import json
-import random
-import requests
-import asyncio
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
+from pathlib import Path
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
-
-from web3 import Web3
 from eth_utils import to_canonical_address
-import ssz
+
+project_root = str(Path(__file__).parent.parent)
+src_dir = os.path.join(project_root, "src")
+sys.path.insert(0, src_dir)
 
 from BALs import *
 from helpers import *
 
-with open("../../rpc.txt", "r") as file:
+rpc_file = os.path.join(project_root, "rpc.txt")
+with open(rpc_file, "r") as file:
     RPC_URL = file.read().strip()
 
 IGNORE_STORAGE_LOCATIONS = False
