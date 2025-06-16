@@ -19,19 +19,22 @@ from helpers import *
 
 with open("../../rpc.txt", "r") as file:
     RPC_URL = file.read().strip()
-    
+
 IGNORE_STORAGE_LOCATIONS = False
 
 
 def extract_balances(state):
     return {
-        addr: bal for addr, changes in state.items()
+        addr: bal
+        for addr, changes in state.items()
         if (bal := parse_hex_or_zero(changes.get("balance")))
     }
 
+
 def parse_pre_and_post_balances(pre_state, post_state):
     return extract_balances(pre_state), extract_balances(post_state)
-    
+
+
 def get_deltas(tx_id, pres, posts, pre_balances, post_balances):
     balance_delta = get_balance_delta(pres, posts, pre_balances, post_balances)
     acc_map: dict[bytes, AccountBalanceDiff] = {}
@@ -39,24 +42,24 @@ def get_deltas(tx_id, pres, posts, pre_balances, post_balances):
         if delta_val == 0:
             continue
         bal_diff = BalanceChange(
-            tx_index=tx_id,
-            delta=delta_val.to_bytes(12, "big", signed=True)
+            tx_index=tx_id, delta=delta_val.to_bytes(12, "big", signed=True)
         )
         if address in acc_map:
             acc_map[address].changes.append(bal_diff)
         else:
             canonical = to_canonical_address(address)
-            acc_map[address] = AccountBalanceDiff(
-                address=canonical,
-                changes=[bal_diff]
-            )
+            acc_map[address] = AccountBalanceDiff(address=canonical, changes=[bal_diff])
     return acc_map
+
 
 def get_balance_delta(pres, posts, pre_balances, post_balances):
     all_addresses = pres.intersection(posts)
-    balance_delta = {addr: post_balances[addr] - pre_balances[addr] for addr in all_addresses}
+    balance_delta = {
+        addr: post_balances[addr] - pre_balances[addr] for addr in all_addresses
+    }
     return balance_delta
-    
+
+
 def get_balance_diff_from_block(trace_result):
     acc_bal_diffs = []
     for tx_id, tx in enumerate(trace_result):
@@ -68,8 +71,8 @@ def get_balance_diff_from_block(trace_result):
 
         pre_state, post_state = tx["result"]["pre"], tx["result"]["post"]
         pre_balances, post_balances = parse_pre_and_post_balances(pre_state, post_state)
-        pres, posts = set(pre_balances.keys()), set(post_balances.keys())                  
-        acc_map = get_deltas(tx_id, pres, posts, pre_balances, post_balances)        
+        pres, posts = set(pre_balances.keys()), set(post_balances.keys())
+        acc_map = get_deltas(tx_id, pres, posts, pre_balances, post_balances)
         acc_bal_diffs.extend(list(acc_map.values()))
 
     balance_diff = ssz.encode(acc_bal_diffs, sedes=BalanceDiffs)
@@ -95,7 +98,7 @@ def process_code_change(
     address_hex: str,
     pre_code: Optional[str],
     post_code: Optional[str],
-    acc_map: Dict[str, AccountCodeDiff]
+    acc_map: Dict[str, AccountCodeDiff],
 ):
     """If there's a code change, update acc_map with a new CodeChange."""
     if post_code is None or post_code == pre_code:
@@ -115,8 +118,7 @@ def process_code_change(
         acc_map[address_hex].changes.append(change)
     else:
         acc_map[address_hex] = AccountCodeDiff(
-            address=to_canonical_address(address_hex),
-            changes=[change]
+            address=to_canonical_address(address_hex), changes=[change]
         )
 
 
@@ -159,23 +161,21 @@ def _add_write(
     address: str,
     slot: str,
     tx_id: int,
-    new_val_hex: str
+    new_val_hex: str,
 ) -> None:
-    acc_map_write.setdefault(address, {}).setdefault(slot, []).append((tx_id, new_val_hex))
+    acc_map_write.setdefault(address, {}).setdefault(slot, []).append(
+        (tx_id, new_val_hex)
+    )
 
 
-def _add_read(
-    acc_map_reads: Dict[str, Set[str]],
-    address: str,
-    slot: str
-) -> None:
+def _add_read(acc_map_reads: Dict[str, Set[str]], address: str, slot: str) -> None:
     acc_map_reads.setdefault(address, set()).add(slot)
 
 
 def _build_slot_accesses(
     acc_map_write: Dict[str, Dict[str, List[Tuple[int, str]]]],
     acc_map_reads: Dict[str, Set[str]],
-    address_hex: str
+    address_hex: str,
 ) -> List[SlotAccess]:
     """Build all SlotAccess entries (writes + pure reads) for one address."""
     slot_accesses: List[SlotAccess] = []
@@ -195,7 +195,9 @@ def _build_slot_accesses(
         if slot_hex in written_slots:
             continue
         slot = hex_to_bytes32(slot_hex)
-        slot_accesses.append(SlotAccess(slot=slot, accesses=[]))  # empty list → pure read
+        slot_accesses.append(
+            SlotAccess(slot=slot, accesses=[])
+        )  # empty list → pure read
 
     return slot_accesses
 
@@ -233,7 +235,9 @@ def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
 
                 # If written (non-equal values or fresh write)
                 if post_val is not None:
-                    pre_bytes = hex_to_bytes32(pre_val) if pre_val is not None else b"\x00" * 32
+                    pre_bytes = (
+                        hex_to_bytes32(pre_val) if pre_val is not None else b"\x00" * 32
+                    )
                     post_bytes = hex_to_bytes32(post_val)
                     if pre_bytes != post_bytes:
                         _add_write(acc_map_write, address, slot, tx_id, post_val)
@@ -285,26 +289,30 @@ def _record_nonce_diff(
     nonce_map: Dict[str, List[Tuple[int, int]]],
     address: str,
     tx_index: int,
-    pre_nonce: int
+    pre_nonce: int,
 ) -> None:
     """Add a nonce change entry to the map."""
     nonce_map.setdefault(address, []).append((tx_index, pre_nonce))
 
 
 def _build_account_nonce_diffs(
-    nonce_map: Dict[str, List[Tuple[int, int]]]
+    nonce_map: Dict[str, List[Tuple[int, int]]],
 ) -> List[AccountNonceDiff]:
     """Convert raw nonce map into SSZ-serializable objects."""
     account_nonce_list: List[AccountNonceDiff] = []
     for address_hex, changes in nonce_map.items():
         addr_bytes20 = to_canonical_address(address_hex)
-        nonce_changes = [NonceChange(tx_index=tx_idx, nonce=pre_n) for tx_idx, pre_n in changes]
-        account_nonce_list.append(AccountNonceDiff(address=addr_bytes20, changes=nonce_changes))
+        nonce_changes = [
+            NonceChange(tx_index=tx_idx, nonce=pre_n) for tx_idx, pre_n in changes
+        ]
+        account_nonce_list.append(
+            AccountNonceDiff(address=addr_bytes20, changes=nonce_changes)
+        )
     return account_nonce_list
 
 
 def build_contract_nonce_diffs_from_state(
-    trace_result: List[Dict[str, Any]]
+    trace_result: List[Dict[str, Any]],
 ) -> Tuple[bytes, List[AccountNonceDiff]]:
     """
     Scan trace_result for contract accounts whose nonce increased during the tx
@@ -332,6 +340,7 @@ def build_contract_nonce_diffs_from_state(
     encoded_bytes = ssz.encode(account_nonce_list, sedes=NonceDiffs)
     return encoded_bytes, account_nonce_list
 
+
 def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessList:
     def sort_account_accesses(account_accesses: AccountAccessList) -> AccountAccessList:
         sorted_accounts = []
@@ -339,20 +348,20 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
             sorted_slots = []
             for slot_access in account.accesses:
                 # Make sure accesses is wrapped as SSZList
-                accesses_sorted = list(sorted(slot_access.accesses, key=lambda x: x.tx_index))
+                accesses_sorted = list(
+                    sorted(slot_access.accesses, key=lambda x: x.tx_index)
+                )
                 accesses_ssz = SSZList(accesses_sorted, MAX_TXS)
 
                 slot_access_sorted = SlotAccess(
-                    slot=slot_access.slot,
-                    accesses=accesses_ssz
+                    slot=slot_access.slot, accesses=accesses_ssz
                 )
                 sorted_slots.append(slot_access_sorted)
 
             sorted_slots_ssz = SSZList(sorted_slots, MAX_SLOTS)
 
             account_sorted = AccountAccess(
-                address=account.address,
-                accesses=sorted_slots_ssz
+                address=account.address, accesses=sorted_slots_ssz
             )
             sorted_accounts.append(account_sorted)
 
@@ -364,30 +373,25 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
             changes_sorted = list(sorted(account.changes, key=lambda x: x.tx_index))
             changes_ssz = SSZList(changes_sorted, MAX_TXS)
 
-            account_sorted = container_cls(
-                address=account.address,
-                changes=changes_ssz
-            )
+            account_sorted = container_cls(address=account.address, changes=changes_ssz)
             sorted_accounts.append(account_sorted)
 
         return SSZList(sorted_accounts, MAX_ACCOUNTS)
 
     return BlockAccessList(
-        account_accesses = sort_account_accesses(block_access_list.account_accesses),
-        balance_diffs    = sort_diffs(block_access_list.balance_diffs, AccountBalanceDiff),
-        code_diffs       = sort_diffs(block_access_list.code_diffs, AccountCodeDiff),
-        nonce_diffs      = sort_diffs(block_access_list.nonce_diffs, AccountNonceDiff),
+        account_accesses=sort_account_accesses(block_access_list.account_accesses),
+        balance_diffs=sort_diffs(block_access_list.balance_diffs, AccountBalanceDiff),
+        code_diffs=sort_diffs(block_access_list.code_diffs, AccountCodeDiff),
+        nonce_diffs=sort_diffs(block_access_list.nonce_diffs, AccountNonceDiff),
     )
 
 
-
-
-async def main():
+def main():
     totals = defaultdict(list)
     block_totals = []
     data = []
 
-    #random_blocks = random.sample(range(22616032 - 7200 * 30, 22616032 + 1), 1000)
+    # random_blocks = random.sample(range(22616032 - 7200 * 30, 22616032 + 1), 1000)
     random_blocks = range(22616032 - 7200 * 30, 22616032 + 1, 216)
 
     for block_number in random_blocks:
@@ -395,23 +399,26 @@ async def main():
         trace_result = fetch_block_trace(block_number, RPC_URL)
 
         # Get diffs
-        storage_diff, account_access_list = get_storage_diff_from_block(trace_result.copy())
+        storage_diff, account_access_list = get_storage_diff_from_block(
+            trace_result.copy()
+        )
         balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result.copy())
         code_diff, acc_code_diffs = get_code_diff_from_block(trace_result.copy())
-        nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(trace_result.copy())
-        
-        
+        nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(
+            trace_result.copy()
+        )
+
         block_obj = BlockAccessList(
             account_accesses=account_access_list,
             balance_diffs=acc_bal_diffs,
             code_diffs=acc_code_diffs,
             nonce_diffs=account_nonce_list,
         )
-        
+
         block_obj_sorted = sort_block_access_list(block_obj)
-        
+
         block_al = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
-        
+
         with open(f"bal_raw/{block_number}_block_access_list.txt", "w") as f:
             f.write(block_al.hex())
 
@@ -427,20 +434,22 @@ async def main():
         accs, slots = count_accounts_and_slots(trace_result)
 
         # Store stats
-        data.append({
-            "block_number": block_number,
-            "sizes": {
-                "storage_access_kb": storage_size,
-                "balance_diffs_kb": balance_size,
-                "nonce_diffs_kb": nonce_size,
-                "code_diffs_kb": code_size,
-                "total_kb": total_size,
-            },
-            "counts": {
-                "accounts": accs,
-                "slots": slots,
+        data.append(
+            {
+                "block_number": block_number,
+                "sizes": {
+                    "storage_access_kb": storage_size,
+                    "balance_diffs_kb": balance_size,
+                    "nonce_diffs_kb": nonce_size,
+                    "code_diffs_kb": code_size,
+                    "total_kb": total_size,
+                },
+                "counts": {
+                    "accounts": accs,
+                    "slots": slots,
+                },
             }
-        })
+        )
 
         # Totals for averages
         totals["storage"].append(storage_size)
@@ -462,5 +471,6 @@ async def main():
     overall_avg = sum(block_totals) / len(block_totals) if block_totals else 0
     print(f"\nOverall average compressed size per block: {overall_avg:.2f} KiB")
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
