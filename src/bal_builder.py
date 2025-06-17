@@ -64,7 +64,7 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
 def get_balance_diff_from_block(trace_result):
     # Aggregate all balance changes per address across the entire block
     address_balance_changes: Dict[str, List[BalanceChange]] = {}
-    
+
     for tx_id, tx in enumerate(trace_result):
         tx_hash = tx.get("txHash")
         result = tx.get("result")
@@ -76,13 +76,13 @@ def get_balance_diff_from_block(trace_result):
         pre_balances, post_balances = parse_pre_and_post_balances(pre_state, post_state)
         pres, posts = set(pre_balances.keys()), set(post_balances.keys())
         acc_map = get_deltas(tx_id, pres, posts, pre_balances, post_balances)
-        
+
         # Aggregate changes by address
         for address, account_diff in acc_map.items():
             if address not in address_balance_changes:
                 address_balance_changes[address] = []
             address_balance_changes[address].extend(account_diff.changes)
-    
+
     # Build final list of AccountBalanceDiff objects
     acc_bal_diffs = []
     for address, changes in address_balance_changes.items():
@@ -166,7 +166,7 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
             if address not in address_code_changes:
                 address_code_changes[address] = []
             address_code_changes[address].extend(account_diff.changes)
-    
+
     # Build final list of AccountCodeDiff objects
     acc_code_diffs = []
     for address, changes in address_code_changes.items():
@@ -227,7 +227,9 @@ def _build_slot_accesses(
     return slot_accesses
 
 
-def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
+def get_storage_diff_from_block(
+    trace_result: List[dict], ignore_reads: bool = IGNORE_STORAGE_LOCATIONS
+) -> bytes:
     """
     Build and SSZ‐encode the BlockAccessList for a given list of tx‐trace dictionaries.
     Returns:
@@ -269,16 +271,18 @@ def get_storage_diff_from_block(trace_result: List[dict]) -> bytes:
                 # If read-only (appears in pre but not modified in post)
                 elif _is_non_write_read(pre_val, post_val):
                     # Only add as read if this slot wasn't written to in this block
-                    if address not in block_writes or slot not in block_writes.get(address, {}):
+                    if address not in block_writes or slot not in block_writes.get(
+                        address, {}
+                    ):
                         _add_read(block_reads, address, slot)
-
+    print(block_writes, block_reads)
     # Build the final account access list with proper aggregation
     per_address_slotaccesses: Dict[bytes, List[SlotAccess]] = {}
-    
+
     for address in set(block_writes.keys()) | set(block_reads.keys()):
         canonical = to_canonical_address(address)
         slot_accesses = _build_slot_accesses(block_writes, block_reads, address)
-        
+
         if slot_accesses:
             per_address_slotaccesses[canonical] = slot_accesses
 
@@ -399,7 +403,9 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
             # account.changes is a regular Python list
             changes_sorted = sorted(account.changes, key=lambda x: x.tx_index)
 
-            account_sorted = container_cls(address=account.address, changes=changes_sorted)
+            account_sorted = container_cls(
+                address=account.address, changes=changes_sorted
+            )
             sorted_accounts.append(account_sorted)
 
         return sorted_accounts
