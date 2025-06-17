@@ -61,3 +61,20 @@ def test_storage_diff_single_slot_update():
     assert (
         int.from_bytes(account_access_list[0].accesses[0].accesses[0].value_after) == 3
     )
+
+
+def test_balance_diff_single_balance_update():
+    contract_address = "0x1385cfe2ac49c92c28e63e51f9fcdcc06f93ed09"
+    trace_output = single_transaction_trace(contract_address)
+    trace_output[0]["result"]["post"][contract_address]["balance"] = "0x02"
+    _, balance_diff_list = get_balance_diff_from_block(trace_output)
+    # Single contract
+    assert len(balance_diff_list) == 1
+    # Correct contract address
+    assert balance_diff_list[0].address == to_canonical_address(contract_address)
+    # Single balance change
+    assert len(balance_diff_list[0].changes) == 1
+    # Correct tx index
+    assert balance_diff_list[0].changes[0].tx_index == 0
+    # Correct tx delta
+    int.from_bytes(balance_diff_list[0].changes[0].delta) == 1
