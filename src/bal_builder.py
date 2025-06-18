@@ -227,8 +227,28 @@ def _build_slot_accesses(
     return slot_accesses
 
 
+def extract_reads_from_block(block_number: int, rpc_url: str) -> Dict[str, Set[str]]:
+    """
+    Extract reads from a block using diff_mode=False.
+    Returns a dictionary mapping addresses to sets of storage slots that were read.
+    """
+    trace_result = fetch_block_trace(block_number, rpc_url, diff_mode=False)
+    reads = defaultdict(set)
+    
+    for tx_trace in trace_result:
+        result = tx_trace.get("result", {})
+        for address, acc_data in result.items():
+            storage = acc_data.get("storage", {})
+            for slot in storage.keys():
+                reads[address.lower()].add(slot.lower())
+    
+    return reads
+
+
 def get_storage_diff_from_block(
-    trace_result: List[dict], ignore_reads: bool = IGNORE_STORAGE_LOCATIONS
+    trace_result: List[dict], 
+    additional_reads: Optional[Dict[str, Set[str]]] = None,
+    ignore_reads: bool = IGNORE_STORAGE_LOCATIONS
 ) -> bytes:
     """
     Build and SSZ‐encode the BlockAccessList for a given list of tx‐trace dictionaries.
@@ -274,6 +294,19 @@ def get_storage_diff_from_block(
                     if address not in block_writes or slot not in block_writes.get(
                         address, {}
                     ):
+                        _add_read(block_reads, address, slot)
+
+    # Add additional reads from diff_mode=False if provided
+    if additional_reads is not None:
+        for address, read_slots in additional_reads.items():
+            # Only add reads that aren't already written to
+            if address not in block_writes:
+                for slot in read_slots:
+                    _add_read(block_reads, address, slot)
+            else:
+                written_slots = set(block_writes[address].keys())
+                for slot in read_slots:
+                    if slot not in written_slots:
                         _add_read(block_reads, address, slot)
     # Build the final account access list with proper aggregation
     per_address_slotaccesses: Dict[bytes, List[SlotAccess]] = {}
@@ -428,9 +461,13 @@ def main():
     for block_number in random_blocks:
         print(f"Processing block {block_number}...")
         trace_result = fetch_block_trace(block_number, RPC_URL)
+        
+        # Fetch reads separately
+        print(f"  Fetching reads for block {block_number}...")
+        block_reads = extract_reads_from_block(block_number, RPC_URL)
 
         # Get diffs
-        storage_diff, account_access_list = get_storage_diff_from_block(trace_result)
+        storage_diff, account_access_list = get_storage_diff_from_block(trace_result, block_reads)
         balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result)
         code_diff, acc_code_diffs = get_code_diff_from_block(trace_result)
         nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(
