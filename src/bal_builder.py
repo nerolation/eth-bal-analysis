@@ -252,6 +252,7 @@ def get_storage_diff_from_block(
 ) -> bytes:
     """
     Build and SSZ‐encode the BlockAccessList for a given list of tx‐trace dictionaries.
+    If ignore_reads is True, only storage writes are included (no read-only accesses).
     Returns:
         A single SSZ‐encoded byte blob using `BlockAccessList` as the top-level sedes.
     """
@@ -289,15 +290,15 @@ def get_storage_diff_from_block(
                         _add_write(block_writes, address, slot, tx_id, post_val)
 
                 # If read-only (appears in pre but not modified in post)
-                elif _is_non_write_read(pre_val, post_val):
+                elif not ignore_reads and _is_non_write_read(pre_val, post_val):
                     # Only add as read if this slot wasn't written to in this block
                     if address not in block_writes or slot not in block_writes.get(
                         address, {}
                     ):
                         _add_read(block_reads, address, slot)
 
-    # Add additional reads from diff_mode=False if provided
-    if additional_reads is not None:
+    # Add additional reads from diff_mode=False if provided and not ignoring reads
+    if not ignore_reads and additional_reads is not None:
         for address, read_slots in additional_reads.items():
             # Only add reads that aren't already written to
             if address not in block_writes:
@@ -462,12 +463,14 @@ def main():
         print(f"Processing block {block_number}...")
         trace_result = fetch_block_trace(block_number, RPC_URL)
         
-        # Fetch reads separately
-        print(f"  Fetching reads for block {block_number}...")
-        block_reads = extract_reads_from_block(block_number, RPC_URL)
+        # Fetch reads separately only if not ignoring storage locations
+        block_reads = None
+        if not IGNORE_STORAGE_LOCATIONS:
+            print(f"  Fetching reads for block {block_number}...")
+            block_reads = extract_reads_from_block(block_number, RPC_URL)
 
         # Get diffs
-        storage_diff, account_access_list = get_storage_diff_from_block(trace_result, block_reads)
+        storage_diff, account_access_list = get_storage_diff_from_block(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS)
         balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result)
         code_diff, acc_code_diffs = get_code_diff_from_block(trace_result)
         nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(
