@@ -17,21 +17,21 @@ def count_accounts_and_slots(trace_result):
     return len(accounts_set), total_slots
 
 
-def get_tracer_payload(block_number_hex):
+def get_tracer_payload(block_number_hex, diff_mode=True):
     return {
         "method": "debug_traceBlockByNumber",
         "params": [
             block_number_hex,
-            {"tracer": "prestateTracer", "tracerConfig": {"diffMode": True}},
+            {"tracer": "prestateTracer", "tracerConfig": {"diffMode": diff_mode}},
         ],
         "id": 1,
         "jsonrpc": "2.0",
     }
 
 
-def fetch_block_trace(block_number, rpc_url):
+def fetch_block_trace(block_number, rpc_url, diff_mode=True):
     block_number_hex = hex(block_number)
-    payload = get_tracer_payload(block_number_hex)  # This must now be sync too
+    payload = get_tracer_payload(block_number_hex, diff_mode)
     response = requests.post(rpc_url, json=payload)
     data = response.json()
     if "error" in data:
