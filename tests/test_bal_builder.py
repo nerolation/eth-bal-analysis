@@ -19,13 +19,15 @@ from bal_builder import (
 ## Auxiliary functions
 
 
-def single_transaction_trace(contract_address) -> List[dict]:
+def single_transaction_trace(
+    contract_address, tx_hash: str = "0xfdc", slot: str = "0x01"
+) -> List[dict]:
     pre_dict = {
         contract_address: {
             "balance": "0x01",
             "code": "0x61",
             "nonce": 1,
-            "storage": {"0x01": "0x02"},
+            "storage": {slot: "0x02"},
         }
     }
     result = {
@@ -34,7 +36,7 @@ def single_transaction_trace(contract_address) -> List[dict]:
     }
     trace_output = [
         {
-            "txHash": "0xfdc",
+            "txHash": tx_hash,
             "result": result,
         }
     ]
@@ -65,6 +67,26 @@ def test_storage_diff_single_slot_update():
     assert (
         int.from_bytes(account_access_list[0].accesses[0].accesses[0].value_after) == 3
     )
+
+
+def test_storage_diff_single_slot_read():
+    contract_address = "0x1385cfe2ac49c92c28e63e51f9fcdcc06f93ed09"
+    slot = "0x01"
+    trace_output = [{}]
+    additional_reads = {contract_address: {slot}}
+    _, account_access_list = get_storage_diff_from_block(
+        trace_output, additional_reads, False
+    )
+    # Single contract
+    assert len(account_access_list) == 1
+    # Correct contract address
+    assert account_access_list[0].address == to_canonical_address(contract_address)
+    # Single slot accessed
+    assert len(account_access_list[0].accesses) == 1
+    # Correct slot
+    assert int.from_bytes(account_access_list[0].accesses[0].slot) == 1
+    # No updates
+    assert len(account_access_list[0].accesses[0].accesses) == 0
 
 
 def test_balance_diff_single_balance_update():
