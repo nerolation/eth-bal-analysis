@@ -56,7 +56,7 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
         pre_balance = pre_balances.get(addr, 0)
         post_balance = post_balances.get(addr, 0)
         delta = post_balance - pre_balance
-        if delta != 0:  # Only include non-zero deltas
+        if delta > 0:  # Only include non-zero deltas
             balance_delta[addr] = delta
     return balance_delta
 
@@ -275,7 +275,6 @@ def get_storage_diff_from_block(
                         address, {}
                     ):
                         _add_read(block_reads, address, slot)
-    print(block_writes, block_reads)
     # Build the final account access list with proper aggregation
     per_address_slotaccesses: Dict[bytes, List[SlotAccess]] = {}
 
