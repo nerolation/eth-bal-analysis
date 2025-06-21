@@ -115,12 +115,10 @@ def test_code_diff_single_code_update():
     assert len(code_diff_list) == 1
     # Correct contract address
     assert code_diff_list[0].address == to_canonical_address(contract_address)
-    # Single code change
-    assert len(code_diff_list[0].changes) == 1
-    # Correct tx index
-    assert code_diff_list[0].changes[0].tx_index == 0
+    # Single code change (now using 'change' instead of 'changes')
+    assert code_diff_list[0].change.tx_index == 0
     # Correct new code
-    assert code_diff_list[0].changes[0].new_code.hex() == "62"
+    assert code_diff_list[0].change.new_code.hex() == "62"
 
 
 def test_contract_nonce_diffs_eoa_nonce_update():

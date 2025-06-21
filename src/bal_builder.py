@@ -128,12 +128,10 @@ def process_code_change(
 
     change = CodeChange(tx_index=tx_id, new_code=code_bytes)
 
-    if address_hex in acc_map:
-        acc_map[address_hex].changes.append(change)
-    else:
-        acc_map[address_hex] = AccountCodeDiff(
-            address=to_canonical_address(address_hex), changes=[change]
-        )
+    # Each account can only have one code change per block
+    acc_map[address_hex] = AccountCodeDiff(
+        address=to_canonical_address(address_hex), change=change
+    )
 
 
 def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
@@ -141,8 +139,8 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
     Builds and SSZ‐encodes all AccountCodeDiff entries for the given trace_result.
     Returns an SSZ-encoded byte blob using `CodeDiffs` as the top-level sedes.
     """
-    # Aggregate all code changes per address across the entire block
-    address_code_changes: Dict[str, List[CodeChange]] = {}
+    # Track code changes per address across the entire block
+    acc_map: Dict[str, AccountCodeDiff] = {}
 
     for tx_id, tx in enumerate(trace_result):
         tx_hash = tx.get("txHash")
@@ -152,8 +150,6 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
             continue
 
         pre_state, post_state = result.get("pre", {}), result.get("post", {})
-        acc_map: Dict[str, AccountCodeDiff] = {}
-
         all_addresses = set(pre_state) | set(post_state)
 
         for address in all_addresses:
@@ -161,17 +157,8 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
             post_code = extract_non_empty_code(post_state, address)
             process_code_change(tx_id, address, pre_code, post_code, acc_map)
 
-        # Aggregate changes by address
-        for address, account_diff in acc_map.items():
-            if address not in address_code_changes:
-                address_code_changes[address] = []
-            address_code_changes[address].extend(account_diff.changes)
-
     # Build final list of AccountCodeDiff objects
-    acc_code_diffs = []
-    for address, changes in address_code_changes.items():
-        canonical = to_canonical_address(address)
-        acc_code_diffs.append(AccountCodeDiff(address=canonical, changes=changes))
+    acc_code_diffs = list(acc_map.values())
 
     return ssz.encode(acc_code_diffs, sedes=CodeDiffs), acc_code_diffs
 
@@ -351,10 +338,10 @@ def _record_nonce_diff(
     nonce_map: Dict[str, List[Tuple[int, int]]],
     address: str,
     tx_index: int,
-    pre_nonce: int,
+    nonce_after: int,
 ) -> None:
     """Add a nonce change entry to the map."""
-    nonce_map.setdefault(address, []).append((tx_index, pre_nonce))
+    nonce_map.setdefault(address, []).append((tx_index, nonce_after))
 
 
 def _build_account_nonce_diffs(
@@ -365,7 +352,7 @@ def _build_account_nonce_diffs(
     for address_hex, changes in nonce_map.items():
         addr_bytes20 = to_canonical_address(address_hex)
         nonce_changes = [
-            NonceChange(tx_index=tx_idx, nonce=pre_n) for tx_idx, pre_n in changes
+            TxNonceDiff(tx_index=tx_idx, nonce_after=nonce_after) for tx_idx, nonce_after in changes
         ]
         account_nonce_list.append(
             AccountNonceDiff(address=addr_bytes20, changes=nonce_changes)
@@ -393,10 +380,11 @@ def build_contract_nonce_diffs_from_state(
         post_state = result.get("post", {})
 
         for address_hex, pre_info in pre_state.items():
-            if not _should_record_nonce_diff(pre_info, post_state.get(address_hex, {})):
+            post_info = post_state.get(address_hex, {})
+            if not _should_record_nonce_diff(pre_info, post_info):
                 continue
-            pre_nonce = int(pre_info["nonce"])
-            _record_nonce_diff(nonce_map, address_hex, tx_index, pre_nonce)
+            post_nonce = _get_nonce(post_info, fallback=pre_info["nonce"])
+            _record_nonce_diff(nonce_map, address_hex, tx_index, post_nonce)
 
     account_nonce_list = _build_account_nonce_diffs(nonce_map)
     encoded_bytes = ssz.encode(account_nonce_list, sedes=NonceDiffs)

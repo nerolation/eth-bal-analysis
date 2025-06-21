@@ -22,7 +22,7 @@ StorageValue = ByteVector(32)
 TxIndex = uint16
 BalanceDelta = ByteVector(12)
 Nonce = uint64
-Code = ByteList(MAX_CODE_SIZE)
+CodeData = ByteList(MAX_CODE_SIZE)
 
 def parse_hex_or_zero(x):
     if pd.isna(x) or x is None:
@@ -88,31 +88,31 @@ class AccountBalanceDiff(Serializable):
 BalanceDiffs = SSZList(AccountBalanceDiff, MAX_ACCOUNTS)
 
 # NONCE DIFF
-class NonceChange(Serializable):
+class TxNonceDiff(Serializable):
     fields = [
         ("tx_index", TxIndex),
-        ("nonce", Nonce),  # could be 'delta' if modeling change; here it's the new nonce
+        ("nonce_after", Nonce),  # nonce value after transaction execution
     ]
 
 class AccountNonceDiff(Serializable):
     fields = [
         ("address", Address),
-        ("changes", SSZList(NonceChange, MAX_TXS)),
+        ("changes", SSZList(TxNonceDiff, MAX_TXS)),
     ]
 
-NonceDiffs = SSZList(AccountNonceDiff, MAX_ACCOUNTS)
+NonceDiffs = SSZList(AccountNonceDiff, MAX_TXS)
 
 
 class CodeChange(Serializable):
     fields = [
         ('tx_index', TxIndex),
-        ('new_code', Code),
+        ('new_code', CodeData),
     ]
 
 class AccountCodeDiff(Serializable):
     fields = [
         ("address", Address),
-        ("changes", SSZList(CodeChange, MAX_TXS)),
+        ("change", CodeChange),
     ]
 
 CodeDiffs = SSZList(AccountCodeDiff, MAX_ACCOUNTS)
