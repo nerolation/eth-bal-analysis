@@ -20,15 +20,15 @@ from BALs import *
 
 def convert_ssz_to_dict(obj) -> Any:
     """Convert SSZ objects to plain Python dictionaries/lists for RLP encoding."""
-    if hasattr(obj, '_asdict'):
-        # Handle SSZ Container objects
+    # Handle SSZ Container objects (like BlockAccessList, AccountAccess, etc.)
+    if hasattr(obj, '__class__') and hasattr(obj.__class__, 'fields'):
         result = {}
         for field_name, _ in obj.__class__.fields:
             field_value = getattr(obj, field_name)
             result[field_name] = convert_ssz_to_dict(field_value)
         return result
-    elif isinstance(obj, list):
-        # Handle SSZ Lists
+    # Handle SSZ Lists (both List and ByteList)
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes)):
         return [convert_ssz_to_dict(item) for item in obj]
     elif isinstance(obj, bytes):
         # Keep bytes as-is for RLP
@@ -63,26 +63,35 @@ def load_and_convert_bal(file_path: str) -> tuple[bytes, bytes, int, int]:
     """
     print(f"Processing {file_path}...")
     
-    # Read the SSZ-encoded hex data
-    with open(file_path, 'r') as f:
-        ssz_hex = f.read().strip()
-    
-    # Convert hex to bytes
-    ssz_data = bytes.fromhex(ssz_hex)
-    
-    # Decode SSZ to get the BlockAccessList object
-    block_access_list = ssz.decode(ssz_data, sedes=BlockAccessList)
-    
-    # Convert SSZ object to plain Python data structure
-    dict_data = convert_ssz_to_dict(block_access_list)
-    
-    # Convert to RLP-compatible list format
-    rlp_data = dict_to_rlp_list(dict_data)
-    
-    # Encode with RLP
-    rlp_encoded = rlp.encode(rlp_data)
-    
-    return ssz_data, rlp_encoded, len(ssz_data), len(rlp_encoded)
+    try:
+        # Read the SSZ-encoded hex data
+        with open(file_path, 'r') as f:
+            ssz_hex = f.read().strip()
+        
+        # Convert hex to bytes
+        ssz_data = bytes.fromhex(ssz_hex)
+        
+        # Decode SSZ to get the BlockAccessList object
+        block_access_list = ssz.decode(ssz_data, sedes=BlockAccessList)
+        
+        # Convert SSZ object to plain Python data structure
+        dict_data = convert_ssz_to_dict(block_access_list)
+        
+        # Convert to RLP-compatible list format
+        rlp_data = dict_to_rlp_list(dict_data)
+        
+        # Encode with RLP
+        rlp_encoded = rlp.encode(rlp_data)
+        
+        return ssz_data, rlp_encoded, len(ssz_data), len(rlp_encoded)
+        
+    except Exception as e:
+        print(f"Debug info for {file_path}:")
+        print(f"  Error: {e}")
+        print(f"  Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 def main():
