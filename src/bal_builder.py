@@ -2,6 +2,7 @@ import os
 import ssz
 import sys
 import json
+import argparse
 from pathlib import Path
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -18,6 +19,7 @@ rpc_file = os.path.join(project_root, "rpc.txt")
 with open(rpc_file, "r") as file:
     RPC_URL = file.read().strip()
 
+# Will be set based on command line arguments
 IGNORE_STORAGE_LOCATIONS = False
 
 
@@ -454,6 +456,18 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
 
 
 def main():
+    global IGNORE_STORAGE_LOCATIONS
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks')
+    parser.add_argument('--no-reads', action='store_true', 
+                        help='Ignore storage read locations (only include writes)')
+    args = parser.parse_args()
+    
+    # Set IGNORE_STORAGE_LOCATIONS based on command line flag
+    IGNORE_STORAGE_LOCATIONS = args.no_reads
+    
+    print(f"Running with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
     totals = defaultdict(list)
     block_totals = []
     data = []
