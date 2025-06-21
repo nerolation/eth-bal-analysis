@@ -15,6 +15,15 @@ project_root = str(Path(__file__).parent.parent)
 src_dir = os.path.join(project_root, "src")
 sys.path.insert(0, src_dir)
 
+# Fix for SSZ ByteList compatibility issue
+from ssz.sedes.byte_list import ByteList
+def fixed_get_sedes_id(self):
+    """Fixed version that uses max_length instead of length"""
+    return f"{self.__class__.__name__}{self.max_length}"
+
+# Monkey patch the ByteList class
+ByteList.get_sedes_id = fixed_get_sedes_id
+
 from BALs import *
 
 
