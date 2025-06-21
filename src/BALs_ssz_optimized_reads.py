@@ -9,7 +9,7 @@ from ssz import Serializable
 from ssz.sedes import ByteVector, ByteList, uint16, uint64, List as SSZList, uint8
 from eth_utils import to_canonical_address
 
-# Constants; chosen to support a 630m block gas limit (per EIP-7918)
+# Constants; chosen to support a 630m block gas limit
 MAX_TXS = 30_000
 MAX_SLOTS = 300_000
 MAX_ACCOUNTS = 300_000
