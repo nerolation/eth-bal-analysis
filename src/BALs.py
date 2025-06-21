@@ -100,7 +100,7 @@ class AccountNonceDiff(Serializable):
         ("changes", SSZList(TxNonceDiff, MAX_TXS)),
     ]
 
-NonceDiffs = SSZList(AccountNonceDiff, MAX_TXS)
+NonceDiffs = SSZList(AccountNonceDiff, MAX_ACCOUNTS)
 
 
 class CodeChange(Serializable):
