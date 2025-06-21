@@ -433,10 +433,22 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
 
         return sorted_accounts
 
+    def sort_code_diffs(diffs):
+        sorted_accounts = []
+        # diffs is a regular Python list
+        for account in sorted(diffs, key=lambda d: bytes(d.address)):
+            # AccountCodeDiff has a single 'change' field, not 'changes'
+            account_sorted = AccountCodeDiff(
+                address=account.address, change=account.change
+            )
+            sorted_accounts.append(account_sorted)
+
+        return sorted_accounts
+
     return BlockAccessList(
         account_accesses=sort_account_accesses(block_access_list.account_accesses),
         balance_diffs=sort_diffs(block_access_list.balance_diffs, AccountBalanceDiff),
-        code_diffs=sort_diffs(block_access_list.code_diffs, AccountCodeDiff),
+        code_diffs=sort_code_diffs(block_access_list.code_diffs),
         nonce_diffs=sort_diffs(block_access_list.nonce_diffs, AccountNonceDiff),
     )
 
