@@ -317,7 +317,8 @@ def get_storage_diff_from_block(
 
 def _get_nonce(info: dict, fallback: str = "0") -> int:
     """Safely parse a nonce string from a state dict, with fallback."""
-    return int(info.get("nonce", fallback))
+    nonce_str = info.get("nonce", fallback)
+    return int(nonce_str, 16) if isinstance(nonce_str, str) and nonce_str.startswith('0x') else int(nonce_str)
 
 
 def _should_record_nonce_diff(pre_info: dict, post_info: dict) -> bool:
@@ -329,8 +330,9 @@ def _should_record_nonce_diff(pre_info: dict, post_info: dict) -> bool:
     if "nonce" not in pre_info or "code" not in pre_info:
         return False
 
-    pre_nonce = int(pre_info["nonce"])
-    post_nonce = _get_nonce(post_info, fallback=pre_info["nonce"])
+    pre_nonce_str = pre_info["nonce"]
+    pre_nonce = int(pre_nonce_str, 16) if isinstance(pre_nonce_str, str) and pre_nonce_str.startswith('0x') else int(pre_nonce_str)
+    post_nonce = _get_nonce(post_info, fallback=str(pre_nonce))
     return post_nonce > pre_nonce
 
 
