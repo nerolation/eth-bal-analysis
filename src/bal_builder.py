@@ -490,7 +490,16 @@ def main():
 
         block_al = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
 
-        with open(f"bal_raw/{block_number}_block_access_list.txt", "w") as f:
+        # Create bal_raw directory in main project directory if it doesn't exist
+        bal_raw_dir = os.path.join(project_root, "bal_raw")
+        os.makedirs(bal_raw_dir, exist_ok=True)
+        
+        # Create filename indicating with/without reads
+        reads_suffix = "without_reads" if IGNORE_STORAGE_LOCATIONS else "with_reads"
+        filename = f"{block_number}_block_access_list_{reads_suffix}.txt"
+        filepath = os.path.join(bal_raw_dir, filename)
+        
+        with open(filepath, "w") as f:
             f.write(block_al.hex())
 
         # Get sizes (in KiB)
