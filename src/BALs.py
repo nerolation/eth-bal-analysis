@@ -55,22 +55,6 @@ AccountAccessList = SSZList(AccountAccess, MAX_ACCOUNTS)
 def estimate_size_bytes(obj):
     return len(json.dumps(obj).encode('utf-8'))
 
-
-class SlotValue(Serializable):
-    fields = [
-        ('slot', StorageKey),
-        ('value', StorageValue),
-    ]
-
-class AccountStorage(Serializable):
-    fields = [
-        ('address', Address),
-        ('slots', SSZList(SlotValue, MAX_SLOTS)),
-    ]
-
-PostBlockStorage = SSZList(AccountStorage, MAX_ACCOUNTS)
-
-
 # BALANCE DIFF
 
 class BalanceChange(Serializable):

@@ -1,6 +1,8 @@
 import pandas as pd
 import requests
 import snappy
+import rlp
+import ssz
 
 
 def count_accounts_and_slots(trace_result):
@@ -70,3 +72,134 @@ def hex_to_bytes32(hexstr: str) -> bytes:
     no_pref = hexstr[2:] if hexstr.startswith("0x") else hexstr
     raw = bytes.fromhex(no_pref)
     return raw.rjust(32, b"\x00")
+
+
+def get_rlp_compressed_size(obj, extra_data=None):
+    """Get snappy-compressed size of RLP object in KiB"""
+    if isinstance(obj, bytes):
+        compressed_data = snappy.compress(obj)
+    else:
+        rlp_encoded = rlp.encode(obj)
+        compressed_data = snappy.compress(rlp_encoded)
+    
+    compressed_size = len(compressed_data)
+
+    # If extra data is provided (like contract code), compress that too
+    if extra_data:
+        for data in extra_data:
+            if data:
+                compressed_size += len(snappy.compress(data))
+
+    return compressed_size / 1024
+
+
+def compare_ssz_rlp_sizes(ssz_obj, rlp_obj, ssz_sedes=None):
+    """
+    Detailed size comparison between SSZ and RLP encodings.
+    Returns dict with raw and compressed sizes for both formats.
+    """
+    # Get SSZ encoding
+    if isinstance(ssz_obj, bytes):
+        ssz_encoded = ssz_obj
+    else:
+        if ssz_sedes is None:
+            raise ValueError("ssz_sedes required when ssz_obj is not bytes")
+        ssz_encoded = ssz.encode(ssz_obj, sedes=ssz_sedes)
+    
+    # Get RLP encoding
+    if isinstance(rlp_obj, bytes):
+        rlp_encoded = rlp_obj
+    else:
+        rlp_encoded = rlp.encode(rlp_obj)
+    
+    # Calculate raw sizes
+    ssz_raw_size = len(ssz_encoded)
+    rlp_raw_size = len(rlp_encoded)
+    
+    # Calculate compressed sizes
+    ssz_compressed_size = len(snappy.compress(ssz_encoded))
+    rlp_compressed_size = len(snappy.compress(rlp_encoded))
+    
+    return {
+        'ssz': {
+            'raw_bytes': ssz_raw_size,
+            'raw_kb': ssz_raw_size / 1024,
+            'compressed_bytes': ssz_compressed_size,
+            'compressed_kb': ssz_compressed_size / 1024,
+            'compression_ratio': ssz_compressed_size / ssz_raw_size
+        },
+        'rlp': {
+            'raw_bytes': rlp_raw_size,
+            'raw_kb': rlp_raw_size / 1024,
+            'compressed_bytes': rlp_compressed_size,
+            'compressed_kb': rlp_compressed_size / 1024,
+            'compression_ratio': rlp_compressed_size / rlp_raw_size
+        },
+        'comparison': {
+            'raw_size_ratio': rlp_raw_size / ssz_raw_size,
+            'compressed_size_ratio': rlp_compressed_size / ssz_compressed_size,
+            'raw_size_diff_bytes': rlp_raw_size - ssz_raw_size,
+            'compressed_size_diff_bytes': rlp_compressed_size - ssz_compressed_size,
+        }
+    }
+
+
+def get_raw_size_kb(obj):
+    """Get raw (uncompressed) size of object in KiB"""
+    if isinstance(obj, bytes):
+        return len(obj) / 1024
+    elif hasattr(obj, '__len__'):
+        # For RLP/SSZ serializable objects, encode first
+        try:
+            encoded = rlp.encode(obj)
+            return len(encoded) / 1024
+        except:
+            try:
+                encoded = ssz.encode(obj)
+                return len(encoded) / 1024
+            except:
+                return 0
+    return 0
+
+
+def analyze_component_sizes(ssz_components, rlp_components, component_names):
+    """
+    Analyze size differences for each component of a BAL.
+    
+    Args:
+        ssz_components: dict with component names as keys and SSZ encoded bytes as values
+        rlp_components: dict with component names as keys and RLP encoded bytes as values
+        component_names: list of component names to analyze
+        
+    Returns:
+        dict with detailed analysis for each component
+    """
+    analysis = {}
+    
+    for component in component_names:
+        if component in ssz_components and component in rlp_components:
+            ssz_data = ssz_components[component]
+            rlp_data = rlp_components[component]
+            
+            # Calculate raw sizes
+            ssz_raw = len(ssz_data)
+            rlp_raw = len(rlp_data)
+            
+            # Calculate compressed sizes
+            ssz_compressed = len(snappy.compress(ssz_data))
+            rlp_compressed = len(snappy.compress(rlp_data))
+            
+            analysis[component] = {
+                'ssz_raw_kb': ssz_raw / 1024,
+                'rlp_raw_kb': rlp_raw / 1024,
+                'ssz_compressed_kb': ssz_compressed / 1024,
+                'rlp_compressed_kb': rlp_compressed / 1024,
+                'raw_size_ratio': rlp_raw / ssz_raw if ssz_raw > 0 else float('inf'),
+                'compressed_size_ratio': rlp_compressed / ssz_compressed if ssz_compressed > 0 else float('inf'),
+                'raw_diff_bytes': rlp_raw - ssz_raw,
+                'compressed_diff_bytes': rlp_compressed - ssz_compressed,
+                'ssz_compression_ratio': ssz_compressed / ssz_raw if ssz_raw > 0 else 0,
+                'rlp_compression_ratio': rlp_compressed / rlp_raw if rlp_raw > 0 else 0,
+            }
+    
+    return analysis

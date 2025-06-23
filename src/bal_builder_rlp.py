@@ -1,5 +1,5 @@
 import os
-import ssz
+import rlp
 import sys
 import json
 import argparse
@@ -12,7 +12,7 @@ project_root = str(Path(__file__).parent.parent)
 src_dir = os.path.join(project_root, "src")
 sys.path.insert(0, src_dir)
 
-from BALs import *
+from BALs_rlp import *
 from helpers import *
 
 rpc_file = os.path.join(project_root, "rpc.txt")
@@ -36,18 +36,18 @@ def parse_pre_and_post_balances(pre_state, post_state):
 
 def get_deltas(tx_id, pres, posts, pre_balances, post_balances):
     balance_delta = get_balance_delta(pres, posts, pre_balances, post_balances)
-    acc_map: dict[bytes, AccountBalanceDiff] = {}
+    acc_map: dict[bytes, AccountBalanceDiffRLP] = {}
     for address, delta_val in balance_delta.items():
         if delta_val == 0:
             continue
-        bal_diff = BalanceChange(
-            tx_index=tx_id, delta=delta_val.to_bytes(12, "big", signed=True)
+        bal_diff = BalanceChangeRLP(
+            tx_index=tx_id, delta=encode_balance_delta(delta_val)
         )
         if address in acc_map:
             acc_map[address].changes.append(bal_diff)
         else:
             canonical = to_canonical_address(address)
-            acc_map[address] = AccountBalanceDiff(address=canonical, changes=[bal_diff])
+            acc_map[address] = AccountBalanceDiffRLP(address=canonical, changes=[bal_diff])
     return acc_map
 
 
@@ -65,7 +65,7 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
 
 def get_balance_diff_from_block(trace_result):
     # Aggregate all balance changes per address across the entire block
-    address_balance_changes: Dict[str, List[BalanceChange]] = {}
+    address_balance_changes: Dict[str, List[BalanceChangeRLP]] = {}
 
     for tx_id, tx in enumerate(trace_result):
         tx_hash = tx.get("txHash")
@@ -85,13 +85,13 @@ def get_balance_diff_from_block(trace_result):
                 address_balance_changes[address] = []
             address_balance_changes[address].extend(account_diff.changes)
 
-    # Build final list of AccountBalanceDiff objects
+    # Build final list of AccountBalanceDiffRLP objects
     acc_bal_diffs = []
     for address, changes in address_balance_changes.items():
         canonical = to_canonical_address(address)
-        acc_bal_diffs.append(AccountBalanceDiff(address=canonical, changes=changes))
+        acc_bal_diffs.append(AccountBalanceDiffRLP(address=canonical, changes=changes))
 
-    balance_diff = ssz.encode(acc_bal_diffs, sedes=BalanceDiffs)
+    balance_diff = rlp.encode(acc_bal_diffs)
     return balance_diff, acc_bal_diffs
 
 
@@ -114,9 +114,9 @@ def process_code_change(
     address_hex: str,
     pre_code: Optional[str],
     post_code: Optional[str],
-    acc_map: Dict[str, AccountCodeDiff],
+    acc_map: Dict[str, AccountCodeDiffRLP],
 ):
-    """If there's a code change, update acc_map with a new CodeChange."""
+    """If there's a code change, update acc_map with a new CodeChangeRLP."""
     if post_code is None or post_code == pre_code:
         return
 
@@ -128,21 +128,21 @@ def process_code_change(
             f"{len(code_bytes)} > {MAX_CODE_SIZE}"
         )
 
-    change = CodeChange(tx_index=tx_id, new_code=code_bytes)
+    change = CodeChangeRLP(tx_index=tx_id, new_code=code_bytes)
 
     # Each account can only have one code change per block
-    acc_map[address_hex] = AccountCodeDiff(
+    acc_map[address_hex] = AccountCodeDiffRLP(
         address=to_canonical_address(address_hex), change=change
     )
 
 
 def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
     """
-    Builds and SSZ‐encodes all AccountCodeDiff entries for the given trace_result.
-    Returns an SSZ-encoded byte blob using `CodeDiffs` as the top-level sedes.
+    Builds and RLP‐encodes all AccountCodeDiffRLP entries for the given trace_result.
+    Returns an RLP-encoded byte blob.
     """
     # Track code changes per address across the entire block
-    acc_map: Dict[str, AccountCodeDiff] = {}
+    acc_map: Dict[str, AccountCodeDiffRLP] = {}
 
     for tx_id, tx in enumerate(trace_result):
         tx_hash = tx.get("txHash")
@@ -159,10 +159,10 @@ def get_code_diff_from_block(trace_result: List[dict]) -> bytes:
             post_code = extract_non_empty_code(post_state, address)
             process_code_change(tx_id, address, pre_code, post_code, acc_map)
 
-    # Build final list of AccountCodeDiff objects
+    # Build final list of AccountCodeDiffRLP objects
     acc_code_diffs = list(acc_map.values())
 
-    return ssz.encode(acc_code_diffs, sedes=CodeDiffs), acc_code_diffs
+    return rlp.encode(acc_code_diffs), acc_code_diffs
 
 
 def _is_non_write_read(pre_val_hex: Optional[str], post_val_hex: Optional[str]) -> bool:
@@ -190,27 +190,27 @@ def _build_slot_accesses(
     acc_map_write: Dict[str, Dict[str, List[Tuple[int, str]]]],
     acc_map_reads: Dict[str, Set[str]],
     address_hex: str,
-) -> List[SlotAccess]:
-    """Build all SlotAccess entries (writes + pure reads) for one address."""
-    slot_accesses: List[SlotAccess] = []
+) -> List[SlotAccessRLP]:
+    """Build all SlotAccessRLP entries (writes + pure reads) for one address."""
+    slot_accesses: List[SlotAccessRLP] = []
 
     # Handle writes
     for slot_hex, write_entries in acc_map_write.get(address_hex, {}).items():
-        slot = hex_to_bytes32(slot_hex)
+        slot = encode_storage_key(slot_hex)
         accesses = [
-            PerTxAccess(tx_index=tx_id, value_after=hex_to_bytes32(val_hex))
+            PerTxAccessRLP(tx_index=tx_id, value_after=encode_storage_value(val_hex))
             for tx_id, val_hex in write_entries
         ]
-        slot_accesses.append(SlotAccess(slot=slot, accesses=accesses))
+        slot_accesses.append(SlotAccessRLP(slot=slot, accesses=accesses))
 
     # Handle reads (only if not written)
     written_slots = set(acc_map_write.get(address_hex, {}))
     for slot_hex in acc_map_reads.get(address_hex, set()):
         if slot_hex in written_slots:
             continue
-        slot = hex_to_bytes32(slot_hex)
+        slot = encode_storage_key(slot_hex)
         slot_accesses.append(
-            SlotAccess(slot=slot, accesses=[])
+            SlotAccessRLP(slot=slot, accesses=[])
         )  # empty list → pure read
 
     return slot_accesses
@@ -240,10 +240,10 @@ def get_storage_diff_from_block(
     ignore_reads: bool = IGNORE_STORAGE_LOCATIONS
 ) -> bytes:
     """
-    Build and SSZ‐encode the BlockAccessList for a given list of tx‐trace dictionaries.
+    Build and RLP‐encode the account access list for a given list of tx‐trace dictionaries.
     If ignore_reads is True, only storage writes are included (no read-only accesses).
     Returns:
-        A single SSZ‐encoded byte blob using `BlockAccessList` as the top-level sedes.
+        A single RLP‐encoded byte blob.
     """
     # Track all writes and reads across the entire block
     block_writes: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
@@ -299,7 +299,7 @@ def get_storage_diff_from_block(
                     if slot not in written_slots:
                         _add_read(block_reads, address, slot)
     # Build the final account access list with proper aggregation
-    per_address_slotaccesses: Dict[bytes, List[SlotAccess]] = {}
+    per_address_slotaccesses: Dict[bytes, List[SlotAccessRLP]] = {}
 
     for address in set(block_writes.keys()) | set(block_reads.keys()):
         canonical = to_canonical_address(address)
@@ -309,12 +309,12 @@ def get_storage_diff_from_block(
             per_address_slotaccesses[canonical] = slot_accesses
 
     account_access_list = [
-        AccountAccess(address=addr, accesses=slots)
+        AccountAccessRLP(address=addr, accesses=slots)
         for addr, slots in per_address_slotaccesses.items()
         if slots
     ]
 
-    return ssz.encode(account_access_list, sedes=AccountAccessList), account_access_list
+    return rlp.encode(account_access_list), account_access_list
 
 
 def _get_nonce(info: dict, fallback: str = "0") -> int:
@@ -350,28 +350,28 @@ def _record_nonce_diff(
 
 def _build_account_nonce_diffs(
     nonce_map: Dict[str, List[Tuple[int, int]]],
-) -> List[AccountNonceDiff]:
-    """Convert raw nonce map into SSZ-serializable objects."""
-    account_nonce_list: List[AccountNonceDiff] = []
+) -> List[AccountNonceDiffRLP]:
+    """Convert raw nonce map into RLP-serializable objects."""
+    account_nonce_list: List[AccountNonceDiffRLP] = []
     for address_hex, changes in nonce_map.items():
         addr_bytes20 = to_canonical_address(address_hex)
         nonce_changes = [
-            TxNonceDiff(tx_index=tx_idx, nonce_after=nonce_after) for tx_idx, nonce_after in changes
+            TxNonceDiffRLP(tx_index=tx_idx, nonce_after=nonce_after) for tx_idx, nonce_after in changes
         ]
         account_nonce_list.append(
-            AccountNonceDiff(address=addr_bytes20, changes=nonce_changes)
+            AccountNonceDiffRLP(address=addr_bytes20, changes=nonce_changes)
         )
     return account_nonce_list
 
 
 def build_contract_nonce_diffs_from_state(
     trace_result: List[Dict[str, Any]],
-) -> Tuple[bytes, List[AccountNonceDiff]]:
+) -> Tuple[bytes, List[AccountNonceDiffRLP]]:
     """
     Scan trace_result for contract accounts whose nonce increased during the tx
     (i.e., they executed a CREATE/CREATE2). Returns:
-      1) the SSZ-encoded bytes of NonceDiffs,
-      2) the raw list[AccountNonceDiff].
+      1) the RLP-encoded bytes,
+      2) the raw list[AccountNonceDiffRLP].
     """
     nonce_map: Dict[str, List[Tuple[int, int]]] = {}
 
@@ -391,11 +391,11 @@ def build_contract_nonce_diffs_from_state(
             _record_nonce_diff(nonce_map, address_hex, tx_index, post_nonce)
 
     account_nonce_list = _build_account_nonce_diffs(nonce_map)
-    encoded_bytes = ssz.encode(account_nonce_list, sedes=NonceDiffs)
+    encoded_bytes = rlp.encode(account_nonce_list)
     return encoded_bytes, account_nonce_list
 
 
-def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessList:
+def sort_block_access_list(block_access_list: BlockAccessListRLP) -> BlockAccessListRLP:
     def sort_account_accesses(account_accesses):
         sorted_accounts = []
         # account_accesses is a regular Python list
@@ -406,7 +406,7 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
                 # Sort the per-tx accesses by tx_index
                 accesses_sorted = sorted(slot_access.accesses, key=lambda x: x.tx_index)
 
-                slot_access_sorted = SlotAccess(
+                slot_access_sorted = SlotAccessRLP(
                     slot=slot_access.slot, accesses=accesses_sorted
                 )
                 sorted_slots.append(slot_access_sorted)
@@ -414,7 +414,7 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
             # Sort slots by slot key
             sorted_slots = sorted(sorted_slots, key=lambda s: bytes(s.slot))
 
-            account_sorted = AccountAccess(
+            account_sorted = AccountAccessRLP(
                 address=account.address, accesses=sorted_slots
             )
             sorted_accounts.append(account_sorted)
@@ -439,19 +439,19 @@ def sort_block_access_list(block_access_list: BlockAccessList) -> BlockAccessLis
         sorted_accounts = []
         # diffs is a regular Python list
         for account in sorted(diffs, key=lambda d: bytes(d.address)):
-            # AccountCodeDiff has a single 'change' field, not 'changes'
-            account_sorted = AccountCodeDiff(
+            # AccountCodeDiffRLP has a single 'change' field, not 'changes'
+            account_sorted = AccountCodeDiffRLP(
                 address=account.address, change=account.change
             )
             sorted_accounts.append(account_sorted)
 
         return sorted_accounts
 
-    return BlockAccessList(
+    return BlockAccessListRLP(
         account_accesses=sort_account_accesses(block_access_list.account_accesses),
-        balance_diffs=sort_diffs(block_access_list.balance_diffs, AccountBalanceDiff),
+        balance_diffs=sort_diffs(block_access_list.balance_diffs, AccountBalanceDiffRLP),
         code_diffs=sort_code_diffs(block_access_list.code_diffs),
-        nonce_diffs=sort_diffs(block_access_list.nonce_diffs, AccountNonceDiff),
+        nonce_diffs=sort_diffs(block_access_list.nonce_diffs, AccountNonceDiffRLP),
     )
 
 
@@ -459,7 +459,7 @@ def main():
     global IGNORE_STORAGE_LOCATIONS
     
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks')
+    parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks using RLP encoding')
     parser.add_argument('--no-reads', action='store_true', 
                         help='Ignore storage read locations (only include writes)')
     args = parser.parse_args()
@@ -467,7 +467,7 @@ def main():
     # Set IGNORE_STORAGE_LOCATIONS based on command line flag
     IGNORE_STORAGE_LOCATIONS = args.no_reads
     
-    print(f"Running with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
+    print(f"Running RLP BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
     totals = defaultdict(list)
     block_totals = []
     data = []
@@ -493,7 +493,7 @@ def main():
             trace_result
         )
 
-        block_obj = BlockAccessList(
+        block_obj = BlockAccessListRLP(
             account_accesses=account_access_list,
             balance_diffs=acc_bal_diffs,
             code_diffs=acc_code_diffs,
@@ -502,15 +502,15 @@ def main():
 
         block_obj_sorted = sort_block_access_list(block_obj)
 
-        block_al = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
+        block_al = rlp.encode(block_obj_sorted)
 
         # Create bal_raw directory in main project directory if it doesn't exist
         bal_raw_dir = os.path.join(project_root, "bal_raw")
         os.makedirs(bal_raw_dir, exist_ok=True)
         
-        # Create filename indicating with/without reads
+        # Create filename indicating with/without reads and RLP encoding
         reads_suffix = "without_reads" if IGNORE_STORAGE_LOCATIONS else "with_reads"
-        filename = f"{block_number}_block_access_list_{reads_suffix}.txt"
+        filename = f"{block_number}_block_access_list_rlp_{reads_suffix}.txt"
         filepath = os.path.join(bal_raw_dir, filename)
         
         with open(filepath, "w") as f:
@@ -553,7 +553,7 @@ def main():
         block_totals.append(total_size)
 
     # Save JSON to file
-    with open("bal_analysis_with_reads.json", "w") as f:
+    with open("bal_analysis_rlp_with_reads.json", "w") as f:
         json.dump(data, f, indent=2)
 
     # Averages
