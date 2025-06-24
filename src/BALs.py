@@ -1,23 +1,3 @@
-"""
-Efficient mapping-based SSZ Block Access List (BAL) structures.
-
-This design follows the natural transaction change pattern:
-address -> field -> tx_index -> change
-
-Key improvements:
-1. Keys are implicit in the mapping structure (no duplicate storage)
-2. Direct address->field->tx mapping eliminates nested loops
-3. Faster lookups and simpler BAL creation
-4. Eliminates redundant key storage in lists
-5. More efficient SSZ encoding with fewer nested structures
-
-Structure pattern:
-- address -> slot -> tx_index -> new_value
-- address -> balance -> tx_index -> delta  
-- address -> nonce -> tx_index -> new_nonce
-- address -> code -> tx_index -> new_code
-"""
-
 import pandas as pd
 import json
 from typing import Dict, List as PyList, Optional, Tuple

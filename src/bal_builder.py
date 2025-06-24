@@ -1,17 +1,3 @@
-"""
-Mapped BAL builder using the efficient mapping-based SSZ structures.
-
-This builder creates MappedBlockAccessList objects that follow the natural pattern:
-address -> field -> tx_index -> change
-
-Key improvements over original:
-1. Keys are implicit in mapping structure (no duplicate storage)
-2. Direct address->field->tx mapping eliminates nested loops
-3. Faster lookups and simpler BAL creation
-4. Eliminates redundant key storage in lists
-5. Single unified structure per account (no separate diffs)
-"""
-
 import os
 import ssz
 import sys
