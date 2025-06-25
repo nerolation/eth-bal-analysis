@@ -15,13 +15,13 @@ project_root = str(Path(__file__).parent.parent)
 src_dir = os.path.join(project_root, "src")
 sys.path.insert(0, src_dir)
 
-from BALs import MappedBlockAccessList, MappedBALBuilder
+from BALs import BlockAccessList, BALBuilder
 from helpers import fetch_block_trace, hex_to_bytes32
 from eth_utils import to_canonical_address
 from bal_builder import (
-    process_storage_changes_mapped, process_balance_changes_mapped,
-    process_code_changes_mapped, process_nonce_changes_mapped,
-    sort_mapped_block_access_list, extract_reads_from_block
+    process_storage_changes, process_balance_changes,
+    process_code_changes, process_nonce_changes,
+    sort_block_access_list, extract_reads_from_block
 )
 
 class TestRealWorldIntegration:
@@ -52,7 +52,7 @@ class TestRealWorldIntegration:
     def test_mock_block_data_processing(self) -> bool:
         """Test processing mock block data directly with builder."""
         try:
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
             # Manually add test data using builder methods
             addr = to_canonical_address("0x1234567890123456789012345678901234567890")
@@ -65,9 +65,9 @@ class TestRealWorldIntegration:
             builder.add_storage_write(addr, slot1, 0, value1)
             builder.add_storage_write(addr, slot2, 0, value2)
             
-            # Add balance change (2000 - 1000 = 1000)
-            balance_delta = (0x1000).to_bytes(12, 'big', signed=True)
-            builder.add_balance_change(addr, 0, balance_delta)
+            # Add balance change (post balance = 0x1000)
+            post_balance = (0x1000).to_bytes(12, 'big', signed=False)
+            builder.add_balance_change(addr, 0, post_balance)
             
             # Add nonce change (from 1 to 2, but only contracts with code get nonce changes recorded)
             # For this test we'll manually add it
@@ -106,7 +106,7 @@ class TestRealWorldIntegration:
     def test_edge_case_zero_values(self) -> bool:
         """Test handling of zero values."""
         try:
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
             addr = to_canonical_address("0x1234567890123456789012345678901234567890")
             slot1 = hex_to_bytes32("0x0000000000000000000000000000000000000000000000000000000000000001")
@@ -148,14 +148,14 @@ class TestRealWorldIntegration:
     def test_edge_case_large_numbers(self) -> bool:
         """Test handling of large numbers in balances and nonces."""
         try:
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
             addr = to_canonical_address("0x1234567890123456789012345678901234567890")
             
-            # Create large balance delta (but keep it within 12 bytes)
+            # Create large post balance (but keep it within 12 bytes)
             # Large positive number that fits in 12 bytes
-            large_balance_delta = (2**95 - 1).to_bytes(12, 'big', signed=True)
-            builder.add_balance_change(addr, 0, large_balance_delta)
+            large_post_balance = (2**95 - 1).to_bytes(12, 'big', signed=False)
+            builder.add_balance_change(addr, 0, large_post_balance)
             
             # Large nonce (within uint64 range)
             large_nonce = 2**32 - 1  # Large but valid nonce
@@ -205,12 +205,12 @@ class TestRealWorldIntegration:
         
         for i, trace in enumerate(malformed_traces):
             try:
-                builder = MappedBALBuilder()
+                builder = BALBuilder()
                 
-                process_storage_changes_mapped([trace], None, True, builder)
-                process_balance_changes_mapped([trace], builder)
-                process_nonce_changes_mapped([trace], builder)
-                process_code_changes_mapped([trace], builder)
+                process_storage_changes([trace], None, True, builder)
+                process_balance_changes([trace], builder)
+                process_nonce_changes([trace], builder)
+                process_code_changes([trace], builder)
                 
                 # Should not crash, might produce empty BAL
                 bal = builder.build()
@@ -248,12 +248,12 @@ class TestRealWorldIntegration:
             })
         
         try:
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
-            process_balance_changes_mapped(mock_trace, builder)
+            process_balance_changes(mock_trace, builder)
             
             bal = builder.build()
-            sorted_bal = sort_mapped_block_access_list(bal)
+            sorted_bal = sort_block_access_list(bal)
             
             # Check sorting
             extracted_addresses = [bytes(account.address).hex() for account in sorted_bal.account_changes]
@@ -291,10 +291,10 @@ class TestRealWorldIntegration:
             
             start_time = time.time()
             
-            builder = MappedBALBuilder()
-            process_balance_changes_mapped(mock_trace, builder)
+            builder = BALBuilder()
+            process_balance_changes(mock_trace, builder)
             bal = builder.build()
-            sorted_bal = sort_mapped_block_access_list(bal)
+            sorted_bal = sort_block_access_list(bal)
             
             end_time = time.time()
             processing_time = end_time - start_time
@@ -328,16 +328,16 @@ class TestRealWorldIntegration:
             print(f"    Fetching real block {test_block}...")
             trace_result = fetch_block_trace(test_block, self.rpc_url)
             
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
             # Process like the real builder does
-            process_storage_changes_mapped(trace_result, None, True, builder)
-            process_balance_changes_mapped(trace_result, builder)
-            process_code_changes_mapped(trace_result, builder)
-            process_nonce_changes_mapped(trace_result, builder)
+            process_storage_changes(trace_result, None, True, builder)
+            process_balance_changes(trace_result, builder)
+            process_code_changes(trace_result, builder)
+            process_nonce_changes(trace_result, builder)
             
             bal = builder.build(ignore_reads=True)
-            sorted_bal = sort_mapped_block_access_list(bal)
+            sorted_bal = sort_block_access_list(bal)
             
             self.assert_test(
                 len(sorted_bal.account_changes) > 0,

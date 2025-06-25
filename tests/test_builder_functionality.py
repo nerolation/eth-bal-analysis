@@ -15,9 +15,9 @@ src_dir = os.path.join(project_root, "src")
 sys.path.insert(0, src_dir)
 
 from BALs import (
-    MappedBlockAccessList, AccountChanges, SlotChanges, SlotRead,
+    BlockAccessList, AccountChanges, SlotChanges, SlotRead,
     StorageChange, BalanceChange, NonceChange, CodeChange,
-    MappedBALBuilder, Address, StorageKey, StorageValue
+    BALBuilder, Address, StorageKey, StorageValue
 )
 
 class TestBuilderFunctionality:
@@ -40,7 +40,7 @@ class TestBuilderFunctionality:
     
     def test_builder_initialization(self) -> bool:
         """Test builder initializes correctly."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         self.assert_test(
             hasattr(builder, 'accounts'),
@@ -56,7 +56,7 @@ class TestBuilderFunctionality:
     
     def test_storage_write_operations(self) -> bool:
         """Test storage write operations."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         slot = b'\x01' * 32
@@ -94,7 +94,7 @@ class TestBuilderFunctionality:
     
     def test_storage_read_operations(self) -> bool:
         """Test storage read operations."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         slot = b'\x01' * 32
@@ -130,7 +130,7 @@ class TestBuilderFunctionality:
     
     def test_balance_change_operations(self) -> bool:
         """Test balance change operations."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         delta = (1000).to_bytes(12, 'big', signed=True)
@@ -167,7 +167,7 @@ class TestBuilderFunctionality:
     
     def test_nonce_change_operations(self) -> bool:
         """Test nonce change operations."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         nonce = 5
@@ -190,7 +190,7 @@ class TestBuilderFunctionality:
     
     def test_code_change_operations(self) -> bool:
         """Test code change operations."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         code = b'\x60\x60\x60\x40'  # Simple contract code
@@ -213,7 +213,7 @@ class TestBuilderFunctionality:
     
     def test_build_with_reads(self) -> bool:
         """Test building BAL with reads included."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         slot_write = b'\x01' * 32
@@ -247,7 +247,7 @@ class TestBuilderFunctionality:
     
     def test_build_without_reads(self) -> bool:
         """Test building BAL with reads ignored."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         slot_write = b'\x01' * 32
@@ -276,7 +276,7 @@ class TestBuilderFunctionality:
     
     def test_edge_case_empty_builder(self) -> bool:
         """Test building from empty builder."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         # Build empty
         bal = builder.build()
@@ -290,7 +290,7 @@ class TestBuilderFunctionality:
     
     def test_edge_case_large_tx_index(self) -> bool:
         """Test with large transaction indices."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         slot = b'\x01' * 32
@@ -319,7 +319,7 @@ class TestBuilderFunctionality:
     
     def test_edge_case_max_code_size(self) -> bool:
         """Test with maximum code size."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         addr = b'\x01' * 20
         # Create code at maximum allowed size (24576 bytes)
@@ -345,7 +345,7 @@ class TestBuilderFunctionality:
     
     def test_multiple_addresses_sorting(self) -> bool:
         """Test that multiple addresses are sorted correctly."""
-        builder = MappedBALBuilder()
+        builder = BALBuilder()
         
         # Add addresses in reverse order
         addr3 = b'\x03' * 20

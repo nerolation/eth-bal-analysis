@@ -16,9 +16,9 @@ src_dir = os.path.join(project_root, "src")
 sys.path.insert(0, src_dir)
 
 from BALs import (
-    MappedBlockAccessList, AccountChanges, SlotChanges, SlotRead,
+    BlockAccessList, AccountChanges, SlotChanges, SlotRead,
     StorageChange, BalanceChange, NonceChange, CodeChange,
-    MappedBALBuilder, Address, StorageKey, StorageValue,
+    BALBuilder, Address, StorageKey, StorageValue,
     SSZList, MAX_ACCOUNTS, MAX_SLOTS, MAX_TXS
 )
 from helpers import get_compressed_size
@@ -58,12 +58,12 @@ class TestSSZEncoding:
         
         # Test BalanceChange
         try:
-            balance_change = BalanceChange(tx_index=1, delta=(1000).to_bytes(12, 'big', signed=True))
+            balance_change = BalanceChange(tx_index=1, post_balance=(1000).to_bytes(12, 'big', signed=False))
             encoded = ssz.encode(balance_change, sedes=BalanceChange)
             decoded = ssz.decode(encoded, sedes=BalanceChange)
             
             self.assert_test(
-                decoded.tx_index == 1 and decoded.delta == (1000).to_bytes(12, 'big', signed=True),
+                decoded.tx_index == 1 and decoded.post_balance == (1000).to_bytes(12, 'big', signed=False),
                 "BalanceChange encoding/decoding"
             )
         except Exception as e:
@@ -153,7 +153,7 @@ class TestSSZEncoding:
                 changes=[StorageChange(tx_index=0, new_value=b'\x10' * 32)]
             )]
             storage_reads = [SlotRead(slot=b'\x02' * 32)]
-            balance_changes = [BalanceChange(tx_index=0, delta=(1000).to_bytes(12, 'big', signed=True))]
+            balance_changes = [BalanceChange(tx_index=0, post_balance=(1000).to_bytes(12, 'big', signed=False))]
             nonce_changes = [NonceChange(tx_index=0, new_nonce=1)]
             
             account_changes = AccountChanges(
@@ -195,10 +195,10 @@ class TestSSZEncoding:
         return True
     
     def test_full_bal_encoding(self) -> bool:
-        """Test encoding of full MappedBlockAccessList."""
+        """Test encoding of full BlockAccessList."""
         try:
             # Create test BAL (without code changes to avoid SSZ library issues)
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
             addr1 = b'\x01' * 20
             addr2 = b'\x02' * 20
@@ -213,8 +213,8 @@ class TestSSZEncoding:
             bal = builder.build(ignore_reads=False)
             
             # Encode and decode
-            encoded = ssz.encode(bal, sedes=MappedBlockAccessList)
-            decoded = ssz.decode(encoded, sedes=MappedBlockAccessList)
+            encoded = ssz.encode(bal, sedes=BlockAccessList)
+            decoded = ssz.decode(encoded, sedes=BlockAccessList)
             
             self.assert_test(
                 len(decoded.account_changes) == 2,
@@ -255,25 +255,25 @@ class TestSSZEncoding:
         """Test that encoding is deterministic."""
         try:
             # Create identical BALs
-            builder1 = MappedBALBuilder()
-            builder2 = MappedBALBuilder()
+            builder1 = BALBuilder()
+            builder2 = BALBuilder()
             
             addr = b'\x01' * 20
             slot = b'\x01' * 32
             value = b'\x10' * 32
-            delta = (1000).to_bytes(12, 'big', signed=True)
+            post_balance = (1000).to_bytes(12, 'big', signed=False)
             
             # Add identical data to both builders
             for builder in [builder1, builder2]:
                 builder.add_storage_write(addr, slot, 0, value)
-                builder.add_balance_change(addr, 0, delta)
+                builder.add_balance_change(addr, 0, post_balance)
             
             bal1 = builder1.build()
             bal2 = builder2.build()
             
             # Encode both
-            encoded1 = ssz.encode(bal1, sedes=MappedBlockAccessList)
-            encoded2 = ssz.encode(bal2, sedes=MappedBlockAccessList)
+            encoded1 = ssz.encode(bal1, sedes=BlockAccessList)
+            encoded2 = ssz.encode(bal2, sedes=BlockAccessList)
             
             self.assert_test(
                 encoded1 == encoded2,
@@ -291,21 +291,21 @@ class TestSSZEncoding:
         """Test that compressed size is reasonable."""
         try:
             # Create test BAL with some data
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
             for i in range(10):
                 addr = (i).to_bytes(20, 'big')
                 slot = (i).to_bytes(32, 'big') 
                 value = (i * 100).to_bytes(32, 'big')
-                delta = (i * 1000).to_bytes(12, 'big', signed=True)
+                post_balance = (i * 1000).to_bytes(12, 'big', signed=False)
                 
                 builder.add_storage_write(addr, slot, 0, value)
-                builder.add_balance_change(addr, 0, delta)
+                builder.add_balance_change(addr, 0, post_balance)
             
             bal = builder.build()
             
             # Get compressed size
-            encoded = ssz.encode(bal, sedes=MappedBlockAccessList)
+            encoded = ssz.encode(bal, sedes=BlockAccessList)
             compressed_size = get_compressed_size(encoded)
             uncompressed_size = len(encoded) / 1024  # Convert to KiB
             
@@ -328,11 +328,11 @@ class TestSSZEncoding:
     def test_empty_bal_encoding(self) -> bool:
         """Test encoding of empty BAL."""
         try:
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             empty_bal = builder.build()
             
-            encoded = ssz.encode(empty_bal, sedes=MappedBlockAccessList)
-            decoded = ssz.decode(encoded, sedes=MappedBlockAccessList)
+            encoded = ssz.encode(empty_bal, sedes=BlockAccessList)
+            decoded = ssz.decode(encoded, sedes=BlockAccessList)
             
             self.assert_test(
                 len(decoded.account_changes) == 0,
@@ -348,7 +348,7 @@ class TestSSZEncoding:
     def test_large_bal_encoding(self) -> bool:
         """Test encoding of large BAL (stress test)."""
         try:
-            builder = MappedBALBuilder()
+            builder = BALBuilder()
             
             # Create larger test data (100 accounts, multiple changes each)
             for i in range(100):
@@ -361,15 +361,15 @@ class TestSSZEncoding:
                     builder.add_storage_write(addr, slot, j % 3, value)
                 
                 # Balance and nonce changes
-                delta = (i * 1000).to_bytes(12, 'big', signed=True)
-                builder.add_balance_change(addr, 0, delta)
+                post_balance = (i * 1000).to_bytes(12, 'big', signed=False)
+                builder.add_balance_change(addr, 0, post_balance)
                 builder.add_nonce_change(addr, 1, i + 1)
             
             bal = builder.build()
             
             # Encode and decode
-            encoded = ssz.encode(bal, sedes=MappedBlockAccessList)
-            decoded = ssz.decode(encoded, sedes=MappedBlockAccessList)
+            encoded = ssz.encode(bal, sedes=BlockAccessList)
+            decoded = ssz.decode(encoded, sedes=BlockAccessList)
             
             self.assert_test(
                 len(decoded.account_changes) == 100,

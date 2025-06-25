@@ -42,8 +42,8 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
             balance_delta[addr] = delta
     return balance_delta
 
-def process_balance_changes_mapped(trace_result, builder: MappedBALBuilder):
-    """Extract balance changes and add them to the mapped builder."""
+def process_balance_changes(trace_result, builder: BALBuilder):
+    """Extract balance changes and add them to the builder."""
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
@@ -56,8 +56,10 @@ def process_balance_changes_mapped(trace_result, builder: MappedBALBuilder):
 
         for address, delta_val in balance_delta.items():
             canonical = to_canonical_address(address)
-            delta_bytes = delta_val.to_bytes(12, "big", signed=True)
-            builder.add_balance_change(canonical, tx_id, delta_bytes)
+            # Calculate post balance for this address
+            post_balance = post_balances.get(address, 0)
+            post_balance_bytes = post_balance.to_bytes(12, "big", signed=False)
+            builder.add_balance_change(canonical, tx_id, post_balance_bytes)
 
 def extract_non_empty_code(state: dict, address: str) -> Optional[str]:
     """Returns the code from state if it's non-empty, else None."""
@@ -71,8 +73,8 @@ def decode_hex_code(code_hex: str) -> bytes:
     code_str = code_hex[2:] if code_hex.startswith("0x") else code_hex
     return bytes.fromhex(code_str)
 
-def process_code_changes_mapped(trace_result: List[dict], builder: MappedBALBuilder):
-    """Extract code changes and add them to the mapped builder."""
+def process_code_changes(trace_result: List[dict], builder: BALBuilder):
+    """Extract code changes and add them to the builder."""
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
@@ -116,13 +118,13 @@ def _is_non_write_read(pre_val_hex: Optional[str], post_val_hex: Optional[str]) 
     """Check if a storage slot qualifies as a pure read."""
     return pre_val_hex is not None and post_val_hex is None
 
-def process_storage_changes_mapped(
+def process_storage_changes(
     trace_result: List[dict], 
     additional_reads: Optional[Dict[str, Set[str]]] = None,
     ignore_reads: bool = IGNORE_STORAGE_LOCATIONS,
-    builder: MappedBALBuilder = None
+    builder: BALBuilder = None
 ):
-    """Extract storage changes and add them to the mapped builder."""
+    """Extract storage changes and add them to the builder."""
     # Track all writes and reads across the entire block
     block_writes: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
     block_reads: Dict[str, Set[str]] = {}
@@ -145,8 +147,12 @@ def process_storage_changes_mapped(
                 pre_val = pre_storage.get(slot)
                 post_val = post_storage.get(slot)
 
-                # If written (non-equal values or fresh write)
+                # Determine if this is a write operation
+                # A write occurs when:
+                # 1. post_val exists and differs from pre_val, OR
+                # 2. pre_val exists but post_val is None (writing zero, slot omitted)
                 if post_val is not None:
+                    # Case 1: Explicit value in post state
                     pre_bytes = (
                         hex_to_bytes32(pre_val) if pre_val is not None else b"\x00" * 32
                     )
@@ -155,7 +161,13 @@ def process_storage_changes_mapped(
                         block_writes.setdefault(address, {}).setdefault(slot, []).append(
                             (tx_id, post_val)
                         )
-
+                elif pre_val is not None and slot not in post_storage:
+                    # Case 2: Slot was non-zero in pre but omitted in post (zeroed)
+                    # This is a write to zero, not a read!
+                    zero_value = "0x" + "00" * 32  # Proper 32-byte zero value
+                    block_writes.setdefault(address, {}).setdefault(slot, []).append(
+                        (tx_id, zero_value)
+                    )
                 # If read-only (appears in pre but not modified in post)
                 elif not ignore_reads and _is_non_write_read(pre_val, post_val):
                     if address not in block_writes or slot not in block_writes.get(address, {}):
@@ -195,8 +207,21 @@ def _get_nonce(info: dict, fallback: str = "0") -> int:
     return int(nonce_str, 16) if isinstance(nonce_str, str) and nonce_str.startswith('0x') else int(nonce_str)
 
 def _should_record_nonce_diff(pre_info: dict, post_info: dict) -> bool:
-    """Determine whether a nonce diff should be recorded."""
+    """Determine whether a nonce diff should be recorded.
+    
+    Per EIP-7928, we only record nonce changes for contracts that perform
+    CREATE/CREATE2 operations. We do NOT record nonce changes that can be
+    statically inferred from the block:
+    - Transaction sender nonce increments
+    - Type 4 transaction 'to' address nonce increments
+    
+    This function assumes it's called for accounts that have code (contracts).
+    """
     if "nonce" not in pre_info or "code" not in pre_info:
+        return False
+
+    # Only record if this is a contract (has code)
+    if not pre_info.get("code") or pre_info["code"] in ("", "0x", "0x0"):
         return False
 
     pre_nonce_str = pre_info["nonce"]
@@ -204,8 +229,8 @@ def _should_record_nonce_diff(pre_info: dict, post_info: dict) -> bool:
     post_nonce = _get_nonce(post_info, fallback=str(pre_nonce))
     return post_nonce > pre_nonce
 
-def process_nonce_changes_mapped(trace_result: List[Dict[str, Any]], builder: MappedBALBuilder):
-    """Extract nonce changes and add them to the mapped builder."""
+def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilder):
+    """Extract nonce changes and add them to the builder."""
     for tx_index, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
@@ -224,11 +249,11 @@ def process_nonce_changes_mapped(trace_result: List[Dict[str, Any]], builder: Ma
             # Follows pattern: address -> nonce -> tx_index -> new_nonce
             builder.add_nonce_change(canonical, tx_index, post_nonce)
 
-def sort_mapped_block_access_list(mapped_bal: MappedBlockAccessList) -> MappedBlockAccessList:
-    """Sort the mapped block access list for deterministic encoding."""
+def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
+    """Sort the block access list for deterministic encoding."""
     sorted_accounts = []
     
-    for account in sorted(mapped_bal.account_changes, key=lambda x: bytes(x.address)):
+    for account in sorted(bal.account_changes, key=lambda x: bytes(x.address)):
         # Sort storage changes by slot and recreate with sorted changes
         sorted_storage_changes = []
         for slot_changes in sorted(account.storage_changes, key=lambda x: bytes(x.slot)):
@@ -255,10 +280,10 @@ def sort_mapped_block_access_list(mapped_bal: MappedBlockAccessList) -> MappedBl
         )
         sorted_accounts.append(sorted_account)
     
-    return MappedBlockAccessList(account_changes=sorted_accounts)
+    return BlockAccessList(account_changes=sorted_accounts)
 
-def get_mapped_component_sizes(mapped_bal: MappedBlockAccessList) -> Dict[str, float]:
-    """Calculate component sizes for mapped BAL structure."""
+def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
+    """Calculate component sizes for BAL structure."""
     
     # Encode each component separately to measure sizes
     storage_changes_data = []
@@ -267,7 +292,7 @@ def get_mapped_component_sizes(mapped_bal: MappedBlockAccessList) -> Dict[str, f
     nonce_changes_data = []
     code_changes_data = []
     
-    for account in mapped_bal.account_changes:
+    for account in bal.account_changes:
         if account.storage_changes:
             storage_changes_data.extend(account.storage_changes)
         if account.storage_reads:
@@ -318,7 +343,7 @@ def main():
     global IGNORE_STORAGE_LOCATIONS
     
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Build Mapped Block Access Lists (BALs) from Ethereum blocks')
+    parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks')
     parser.add_argument('--no-reads', action='store_true', 
                         help='Ignore storage read locations (only include writes)')
     args = parser.parse_args()
@@ -326,7 +351,7 @@ def main():
     # Set IGNORE_STORAGE_LOCATIONS based on command line flag
     IGNORE_STORAGE_LOCATIONS = args.no_reads
     
-    print(f"Running mapped SSZ BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
+    print(f"Running SSZ BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
     totals = defaultdict(list)
     block_totals = []
     data = []
@@ -344,42 +369,42 @@ def main():
             print(f"  Fetching reads for block {block_number}...")
             block_reads = extract_reads_from_block(block_number, RPC_URL)
 
-        # Create mapped builder - follows address->field->tx_index->change pattern
-        builder = MappedBALBuilder()
+        # Create builder - follows address->field->tx_index->change pattern
+        builder = BALBuilder()
         
-        # Extract all components into the builder using the mapping approach
-        process_storage_changes_mapped(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder)
-        process_balance_changes_mapped(trace_result, builder)
-        process_code_changes_mapped(trace_result, builder)
-        process_nonce_changes_mapped(trace_result, builder)
+        # Extract all components into the builder
+        process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder)
+        process_balance_changes(trace_result, builder)
+        process_code_changes(trace_result, builder)
+        process_nonce_changes(trace_result, builder)
         
-        # Build the mapped block access list
+        # Build the block access list
         block_obj = builder.build(ignore_reads=IGNORE_STORAGE_LOCATIONS)
-        block_obj_sorted = sort_mapped_block_access_list(block_obj)
+        block_obj_sorted = sort_block_access_list(block_obj)
         
-        # Encode the entire mapped block
-        full_block_encoded = ssz.encode(block_obj_sorted, sedes=MappedBlockAccessList)
+        # Encode the entire block
+        full_block_encoded = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
 
-        # Create bal_raw/mapped directory
-        bal_raw_mapped_dir = os.path.join(project_root, "bal_raw", "mapped")
-        os.makedirs(bal_raw_mapped_dir, exist_ok=True)
+        # Create bal_raw directory
+        bal_raw_dir = os.path.join(project_root, "bal_raw")
+        os.makedirs(bal_raw_dir, exist_ok=True)
         
         # Create filename indicating with/without reads
         reads_suffix = "without_reads" if IGNORE_STORAGE_LOCATIONS else "with_reads"
-        filename = f"{block_number}_block_access_list_mapped_{reads_suffix}.txt"
-        filepath = os.path.join(bal_raw_mapped_dir, filename)
+        filename = f"{block_number}_block_access_list_{reads_suffix}.txt"
+        filepath = os.path.join(bal_raw_dir, filename)
         
         with open(filepath, "w") as f:
             f.write(full_block_encoded.hex())
 
-        # Calculate component sizes using the mapped structure
-        component_sizes = get_mapped_component_sizes(block_obj_sorted)
+        # Calculate component sizes
+        component_sizes = get_component_sizes(block_obj_sorted)
 
         # Count affected accounts and slots from original trace for comparison
         accs, slots = count_accounts_and_slots(trace_result)
         
-        # Get mapped-specific stats
-        mapped_stats = get_mapped_account_stats(block_obj_sorted)
+        # Get BAL stats
+        bal_stats = get_account_stats(block_obj_sorted)
 
         # Store stats
         data.append({
@@ -389,7 +414,7 @@ def main():
                 "accounts": accs,
                 "slots": slots,
             },
-            "mapped_stats": mapped_stats,
+            "bal_stats": bal_stats,
         })
 
         # Totals for averages
@@ -401,9 +426,9 @@ def main():
         totals["nonce"].append(component_sizes["nonce_diffs_kb"])
         block_totals.append(component_sizes["total_kb"])
 
-    # Save JSON to file with appropriate name based on reads flag in mapped directory
-    filename = "bal_analysis_mapped_without_reads.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_mapped_with_reads.json"
-    filepath = os.path.join(bal_raw_mapped_dir, filename)
+    # Save JSON to file with appropriate name based on reads flag
+    filename = "bal_analysis_without_reads.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads.json"
+    filepath = os.path.join(bal_raw_dir, filename)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -416,14 +441,14 @@ def main():
     overall_avg = sum(block_totals) / len(block_totals) if block_totals else 0
     print(f"\nOverall average compressed size per block: {overall_avg:.2f} KiB")
     
-    # Show mapping efficiency stats
+    # Show efficiency stats
     if data:
-        avg_mapped_accounts = sum(d["mapped_stats"]["total_accounts"] for d in data) / len(data)
-        avg_storage_writes = sum(d["mapped_stats"]["total_storage_writes"] for d in data) / len(data)
-        avg_storage_reads = sum(d["mapped_stats"]["total_storage_reads"] for d in data) / len(data)
+        avg_accounts = sum(d["bal_stats"]["total_accounts"] for d in data) / len(data)
+        avg_storage_writes = sum(d["bal_stats"]["total_storage_writes"] for d in data) / len(data)
+        avg_storage_reads = sum(d["bal_stats"]["total_storage_reads"] for d in data) / len(data)
         
-        print(f"\nMapping efficiency stats:")
-        print(f"Average accounts per block: {avg_mapped_accounts:.1f}")
+        print(f"\nEfficiency stats:")
+        print(f"Average accounts per block: {avg_accounts:.1f}")
         print(f"Average storage writes per block: {avg_storage_writes:.1f}")
         print(f"Average storage reads per block: {avg_storage_reads:.1f}")
 

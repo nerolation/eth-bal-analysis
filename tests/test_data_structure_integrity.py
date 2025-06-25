@@ -18,9 +18,9 @@ sys.path.insert(0, src_dir)
 
 import BALs
 from BALs import (
-    MappedBlockAccessList, AccountChanges, SlotChanges, SlotRead,
+    BlockAccessList, AccountChanges, SlotChanges, SlotRead,
     StorageChange, BalanceChange, NonceChange, CodeChange,
-    MappedBALBuilder, Address, StorageKey, StorageValue
+    BALBuilder, Address, StorageKey, StorageValue
 )
 
 class TestDataStructureIntegrity:
@@ -41,7 +41,7 @@ class TestDataStructureIntegrity:
             self.failed += 1
             print(f"  ❌ {test_name}: {error_msg}")
     
-    def test_address_uniqueness(self, bal: MappedBlockAccessList) -> bool:
+    def test_address_uniqueness(self, bal: BlockAccessList) -> bool:
         """Test that each address appears only once in account_changes."""
         addresses_seen: Set[bytes] = set()
         duplicates = []
@@ -59,7 +59,7 @@ class TestDataStructureIntegrity:
         )
         return len(duplicates) == 0
     
-    def test_storage_key_uniqueness_per_address(self, bal: MappedBlockAccessList) -> bool:
+    def test_storage_key_uniqueness_per_address(self, bal: BlockAccessList) -> bool:
         """Test that storage keys are unique per address."""
         violations = []
         
@@ -94,7 +94,7 @@ class TestDataStructureIntegrity:
         )
         return len(violations) == 0
     
-    def test_sorting_correctness(self, bal: MappedBlockAccessList) -> bool:
+    def test_sorting_correctness(self, bal: BlockAccessList) -> bool:
         """Test that all components are properly sorted."""
         violations = []
         
@@ -157,7 +157,7 @@ class TestDataStructureIntegrity:
         )
         return len(violations) == 0
     
-    def test_data_type_correctness(self, bal: MappedBlockAccessList) -> bool:
+    def test_data_type_correctness(self, bal: BlockAccessList) -> bool:
         """Test that all data types are correct."""
         violations = []
         
@@ -179,10 +179,10 @@ class TestDataStructureIntegrity:
                 if len(slot_read.slot) != 32:
                     violations.append(f"Invalid read slot length: {len(slot_read.slot)} bytes")
             
-            # Test balance deltas are 12 bytes (signed)
+            # Test balance post_balance are 12 bytes
             for balance_change in account.balance_changes:
-                if len(balance_change.delta) != 12:
-                    violations.append(f"Invalid balance delta length: {len(balance_change.delta)} bytes")
+                if len(balance_change.post_balance) != 12:
+                    violations.append(f"Invalid balance post_balance length: {len(balance_change.post_balance)} bytes")
         
         self.assert_test(
             len(violations) == 0,
@@ -191,7 +191,7 @@ class TestDataStructureIntegrity:
         )
         return len(violations) == 0
     
-    def test_tx_index_validity(self, bal: MappedBlockAccessList) -> bool:
+    def test_tx_index_validity(self, bal: BlockAccessList) -> bool:
         """Test that tx_index values are valid."""
         violations = []
         max_tx_index = 0
@@ -229,7 +229,7 @@ class TestDataStructureIntegrity:
         )
         return len(violations) == 0
     
-    def test_ssz_serialization_roundtrip(self, bal: MappedBlockAccessList) -> bool:
+    def test_ssz_serialization_roundtrip(self, bal: BlockAccessList) -> bool:
         """Test that SSZ serialization and deserialization works correctly."""
         try:
             # Filter out any accounts with code changes to avoid SSZ library issues
@@ -249,16 +249,16 @@ class TestDataStructureIntegrity:
                     )
                     filtered_accounts.append(filtered_account)
             
-            filtered_bal = MappedBlockAccessList(account_changes=filtered_accounts)
+            filtered_bal = BlockAccessList(account_changes=filtered_accounts)
             
             # Serialize
-            encoded = ssz.encode(filtered_bal, sedes=MappedBlockAccessList)
+            encoded = ssz.encode(filtered_bal, sedes=BlockAccessList)
             
             # Deserialize
-            decoded = ssz.decode(encoded, sedes=MappedBlockAccessList)
+            decoded = ssz.decode(encoded, sedes=BlockAccessList)
             
             # Re-serialize to compare
-            re_encoded = ssz.encode(decoded, sedes=MappedBlockAccessList)
+            re_encoded = ssz.encode(decoded, sedes=BlockAccessList)
             
             # Should be identical
             matches = encoded == re_encoded
@@ -278,7 +278,7 @@ class TestDataStructureIntegrity:
             )
             return False
     
-    def test_empty_account_filtering(self, bal: MappedBlockAccessList) -> bool:
+    def test_empty_account_filtering(self, bal: BlockAccessList) -> bool:
         """Test that accounts with no changes are not included."""
         violations = []
         
@@ -301,7 +301,7 @@ class TestDataStructureIntegrity:
         )
         return len(violations) == 0
     
-    def run_all_tests(self, bal: MappedBlockAccessList) -> Dict[str, bool]:
+    def run_all_tests(self, bal: BlockAccessList) -> Dict[str, bool]:
         """Run all integrity tests on a BAL."""
         print("🔍 Running Data Structure Integrity Tests...")
         print("-" * 50)
@@ -319,9 +319,9 @@ class TestDataStructureIntegrity:
         
         return results
 
-def create_test_bal() -> MappedBlockAccessList:
+def create_test_bal() -> BlockAccessList:
     """Create a test BAL with various scenarios."""
-    builder = MappedBALBuilder()
+    builder = BALBuilder()
     
     # Create test addresses
     addr1 = b'\x01' * 20
@@ -344,10 +344,10 @@ def create_test_bal() -> MappedBlockAccessList:
     builder.add_storage_read(addr3, slot1)
     
     # Add balance changes
-    delta1 = (1000).to_bytes(12, 'big', signed=True)
-    delta2 = (-500).to_bytes(12, 'big', signed=True)
-    builder.add_balance_change(addr1, 0, delta1)
-    builder.add_balance_change(addr2, 1, delta2)
+    post_balance1 = (1000).to_bytes(12, 'big', signed=False)
+    post_balance2 = (500).to_bytes(12, 'big', signed=False)
+    builder.add_balance_change(addr1, 0, post_balance1)
+    builder.add_balance_change(addr2, 1, post_balance2)
     
     # Add nonce changes
     builder.add_nonce_change(addr1, 0, 1)
