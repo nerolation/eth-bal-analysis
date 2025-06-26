@@ -208,7 +208,8 @@ class TestRealWorldIntegration:
                 builder = BALBuilder()
                 
                 process_storage_changes([trace], None, True, builder)
-                process_balance_changes([trace], builder)
+                touched_addresses = set()
+                process_balance_changes([trace], builder, touched_addresses)
                 process_nonce_changes([trace], builder)
                 process_code_changes([trace], builder)
                 
@@ -250,7 +251,8 @@ class TestRealWorldIntegration:
         try:
             builder = BALBuilder()
             
-            process_balance_changes(mock_trace, builder)
+            touched_addresses = set()
+            process_balance_changes(mock_trace, builder, touched_addresses)
             
             bal = builder.build()
             sorted_bal = sort_block_access_list(bal)
@@ -292,7 +294,8 @@ class TestRealWorldIntegration:
             start_time = time.time()
             
             builder = BALBuilder()
-            process_balance_changes(mock_trace, builder)
+            touched_addresses = set()
+            process_balance_changes(mock_trace, builder, touched_addresses)
             bal = builder.build()
             sorted_bal = sort_block_access_list(bal)
             
@@ -332,7 +335,8 @@ class TestRealWorldIntegration:
             
             # Process like the real builder does
             process_storage_changes(trace_result, None, True, builder)
-            process_balance_changes(trace_result, builder)
+            touched_addresses = set()
+            process_balance_changes(trace_result, builder, touched_addresses)
             process_code_changes(trace_result, builder)
             process_nonce_changes(trace_result, builder)
             

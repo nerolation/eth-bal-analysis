@@ -42,7 +42,7 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
             balance_delta[addr] = delta
     return balance_delta
 
-def process_balance_changes(trace_result, builder: BALBuilder):
+def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses: set):
     """Extract balance changes and add them to the builder."""
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
@@ -53,6 +53,11 @@ def process_balance_changes(trace_result, builder: BALBuilder):
         pre_balances, post_balances = parse_pre_and_post_balances(pre_state, post_state)
         pres, posts = set(pre_balances.keys()), set(post_balances.keys())
         balance_delta = get_balance_delta(pres, posts, pre_balances, post_balances)
+
+        # Track all addresses that had balance checks (even zero-value transfers)
+        all_balance_addresses = pres.union(posts)
+        for address in all_balance_addresses:
+            touched_addresses.add(address.lower())
 
         for address, delta_val in balance_delta.items():
             canonical = to_canonical_address(address)
@@ -249,6 +254,25 @@ def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilde
             # Follows pattern: address -> nonce -> tx_index -> new_nonce
             builder.add_nonce_change(canonical, tx_index, post_nonce)
 
+def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
+    """Collect all addresses that were touched during execution (including read-only access)."""
+    touched = set()
+    
+    for tx in trace_result:
+        result = tx.get("result")
+        if not isinstance(result, dict):
+            continue
+            
+        pre_state = result.get("pre", {})
+        post_state = result.get("post", {})
+        
+        # Any address in pre or post state was touched
+        all_addresses = set(pre_state.keys()) | set(post_state.keys())
+        for addr in all_addresses:
+            touched.add(addr.lower())
+    
+    return touched
+
 def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
     """Sort the block access list for deterministic encoding."""
     sorted_accounts = []
@@ -372,11 +396,21 @@ def main():
         # Create builder - follows address->field->tx_index->change pattern
         builder = BALBuilder()
         
+        # Collect all touched addresses
+        touched_addresses = collect_touched_addresses(trace_result)
+        
         # Extract all components into the builder
         process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder)
-        process_balance_changes(trace_result, builder)
+        process_balance_changes(trace_result, builder, touched_addresses)
         process_code_changes(trace_result, builder)
         process_nonce_changes(trace_result, builder)
+        
+        # Add any touched addresses that don't already have changes
+        # Only include touched addresses when NOT ignoring reads (per EIP-7928)
+        if not IGNORE_STORAGE_LOCATIONS:
+            for addr in touched_addresses:
+                canonical = to_canonical_address(addr)
+                builder.add_touched_account(canonical)
         
         # Build the block access list
         block_obj = builder.build(ignore_reads=IGNORE_STORAGE_LOCATIONS)
@@ -385,8 +419,8 @@ def main():
         # Encode the entire block
         full_block_encoded = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
 
-        # Create bal_raw directory
-        bal_raw_dir = os.path.join(project_root, "bal_raw")
+        # Create bal_raw/ssz directory
+        bal_raw_dir = os.path.join(project_root, "bal_raw", "ssz")
         os.makedirs(bal_raw_dir, exist_ok=True)
         
         # Create filename indicating with/without reads
@@ -394,8 +428,8 @@ def main():
         filename = f"{block_number}_block_access_list_{reads_suffix}.txt"
         filepath = os.path.join(bal_raw_dir, filename)
         
-        with open(filepath, "w") as f:
-            f.write(full_block_encoded.hex())
+        with open(filepath, "wb") as f:
+            f.write(full_block_encoded)
 
         # Calculate component sizes
         component_sizes = get_component_sizes(block_obj_sorted)
@@ -428,7 +462,7 @@ def main():
 
     # Save JSON to file with appropriate name based on reads flag
     filename = "bal_analysis_without_reads.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads.json"
-    filepath = os.path.join(bal_raw_dir, filename)
+    filepath = os.path.join(project_root, "bal_raw", "ssz", filename)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
 

@@ -178,6 +178,10 @@ class BALBuilder:
         change = CodeChange(tx_index=tx_index, new_code=new_code)
         self.accounts[address]['code_changes'].append(change)
     
+    def add_touched_account(self, address: bytes):
+        """Add an account that was touched but not changed (e.g., for EXTCODEHASH, BALANCE checks)"""
+        self._ensure_account(address)
+    
     def build(self, ignore_reads: bool = False) -> BlockAccessList:
         """Build the final BlockAccessList."""
         account_changes_list = []
