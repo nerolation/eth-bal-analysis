@@ -163,9 +163,17 @@ def process_storage_changes(
                     )
                     post_bytes = hex_to_bytes32(post_val)
                     if pre_bytes != post_bytes:
+                        # Changed write
                         block_writes.setdefault(address, {}).setdefault(slot, []).append(
                             (tx_id, post_val)
                         )
+                    else:
+                        # Unchanged write - treat as read per EIP-7928
+                        # Storage writes that don't change value still consume gas
+                        # and must be included in the BAL as reads
+                        if not ignore_reads:
+                            if address not in block_writes or slot not in block_writes.get(address, {}):
+                                block_reads.setdefault(address, set()).add(slot)
                 elif pre_val is not None and slot not in post_storage:
                     # Case 2: Slot was non-zero in pre but omitted in post (zeroed)
                     # This is a write to zero, not a read!
