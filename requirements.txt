@@ -61,7 +61,7 @@ requests==2.32.4
 rlp==4.1.0
 setuptools==78.1.1
 six==1.17.0
-snappy==3.2
+python-snappy==0.7.3
 snappy_manifolds==1.2.1
 spherogram==2.3
 ssz==0.5.2
