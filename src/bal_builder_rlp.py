@@ -299,6 +299,142 @@ def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
     
     return touched
 
+def identify_simple_eth_transfers_from_trace(trace_result: List[dict]) -> Dict[int, Dict[str, str]]:
+    """
+    Identify simple ETH transfers using the trace data we already have.
+    
+    A simple ETH transfer is characterized by:
+    1. Only balance changes (no storage, code, or nonce changes beyond sender nonce)
+    2. One sender (balance decreases, nonce increases by 1)
+    3. May have fee recipient (miner/validator) - balance increases, no nonce change
+    4. Recipient may not appear in state diff if they don't have prior balance
+    5. No contract code deployment or execution
+    
+    Args:
+        trace_result: The trace result from debug_traceBlockByNumber
+        
+    Returns:
+        dict: Maps tx_index to dict with 'from' and 'to' addresses for simple transfers
+    """
+    simple_transfers = {}
+    
+    for tx_id, tx in enumerate(trace_result):
+        result = tx.get("result")
+        if not isinstance(result, dict):
+            continue
+            
+        pre_state = result.get("pre", {})
+        post_state = result.get("post", {})
+        
+        # Get all addresses involved in this transaction
+        all_addresses = set(pre_state.keys()) | set(post_state.keys())
+        
+        # For simple ETH transfers, we expect 1-3 addresses:
+        # - Sender (always present)
+        # - Recipient (may not be in state diff if new account)
+        # - Fee recipient/miner (usually present)
+        if len(all_addresses) == 0 or len(all_addresses) > 3:
+            continue
+            
+        # Check that only balance changes occurred (no storage, code changes)
+        is_simple_transfer = True
+        sender_addr = None
+        potential_recipients = []
+        fee_recipient = None
+        
+        for addr in all_addresses:
+            pre_info = pre_state.get(addr, {})
+            post_info = post_state.get(addr, {})
+            
+            # Check for storage changes
+            pre_storage = pre_info.get("storage", {})
+            post_storage = post_info.get("storage", {})
+            if pre_storage or post_storage:
+                is_simple_transfer = False
+                break
+                
+            # Check for code changes
+            pre_code = pre_info.get("code", "")
+            post_code = post_info.get("code", "")
+            if pre_code != post_code:
+                is_simple_transfer = False
+                break
+                
+            # Check balance changes
+            pre_balance = parse_hex_or_zero(pre_info.get("balance", "0"))
+            post_balance = parse_hex_or_zero(post_info.get("balance", "0"))
+            balance_delta = post_balance - pre_balance
+            
+            # Check nonce changes
+            pre_nonce_val = pre_info.get("nonce", "0")
+            post_nonce_val = post_info.get("nonce", pre_nonce_val)  # Default to pre value if missing
+            
+            if isinstance(pre_nonce_val, str) and pre_nonce_val.startswith("0x"):
+                pre_nonce = int(pre_nonce_val, 16)
+            else:
+                pre_nonce = int(pre_nonce_val)
+                
+            if isinstance(post_nonce_val, str) and post_nonce_val.startswith("0x"):
+                post_nonce = int(post_nonce_val, 16)
+            else:
+                post_nonce = int(post_nonce_val)
+                
+            nonce_delta = post_nonce - pre_nonce
+            
+            # Classify the address role
+            if balance_delta < 0 and nonce_delta == 1:
+                # This is the sender (lost balance and nonce increased)
+                if sender_addr is not None:
+                    # Multiple senders - not a simple transfer
+                    is_simple_transfer = False
+                    break
+                sender_addr = addr.lower()
+            elif balance_delta > 0 and nonce_delta == 0:
+                # This could be recipient or fee recipient
+                potential_recipients.append(addr.lower())
+            elif balance_delta == 0 and nonce_delta == 0:
+                # Account appeared but no changes - possible recipient with 0 previous balance
+                potential_recipients.append(addr.lower())
+            else:
+                # Unexpected pattern - not a simple transfer
+                is_simple_transfer = False
+                break
+        
+        # Validate we found exactly one sender
+        if not is_simple_transfer or sender_addr is None:
+            continue
+            
+        # For simple transfers, handle the main case we can detect:
+        # Sender exists and we have 1-2 additional addresses that gained balance
+        if len(all_addresses) >= 1 and sender_addr is not None:
+            # Check if we can identify a clear recipient (gained significant balance)
+            recipient_found = False
+            
+            if len(potential_recipients) == 1:
+                # Only one potential recipient - could be the actual recipient
+                recipient_addr = potential_recipients[0]
+                recipient_pre = pre_state.get(recipient_addr, {})
+                recipient_post = post_state.get(recipient_addr, {})
+                recipient_pre_balance = parse_hex_or_zero(recipient_pre.get("balance", "0"))
+                recipient_post_balance = parse_hex_or_zero(recipient_post.get("balance", "0"))
+                
+                if recipient_post_balance > recipient_pre_balance:
+                    simple_transfers[tx_id] = {
+                        "from": sender_addr,
+                        "to": recipient_addr
+                    }
+                    recipient_found = True
+                    
+            # If we couldn't identify a clear recipient, it might be a transfer to a new account
+            if not recipient_found:
+                # This is likely a simple transfer where recipient is new (not in state diff)
+                simple_transfers[tx_id] = {
+                    "from": sender_addr,
+                    "to": "unknown_new_account"  # Placeholder
+                }
+    
+    return simple_transfers
+
 def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
     """Sort the block access list for deterministic encoding."""
     sorted_accounts = []
@@ -425,7 +561,7 @@ def main():
         # Collect all touched addresses
         touched_addresses = collect_touched_addresses(trace_result)
         
-        # Identify simple ETH transfers
+        # Identify simple ETH transfers using gas-based method (correct)
         print(f"  Identifying simple ETH transfers for block {block_number}...")
         simple_transfers = identify_simple_eth_transfers(block_number, RPC_URL)
         if simple_transfers:
@@ -451,8 +587,8 @@ def main():
         # Encode the entire block
         full_block_encoded = rlp.encode(block_obj_sorted)
 
-        # Create bal_raw/rlp_new directory for new implementation
-        bal_raw_dir = os.path.join(project_root, "bal_raw", "rlp_new")
+        # Create bal_raw/rlp directory
+        bal_raw_dir = os.path.join(project_root, "bal_raw", "rlp")
         os.makedirs(bal_raw_dir, exist_ok=True)
         
         # Create filename indicating with/without reads
@@ -493,8 +629,8 @@ def main():
         block_totals.append(component_sizes["total_kb"])
 
     # Save JSON to file with appropriate name based on reads flag
-    filename = "bal_analysis_rlp_without_reads_new.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_rlp_with_reads_new.json"
-    filepath = os.path.join(project_root, "bal_raw", "rlp_new", filename)
+    filename = "bal_analysis_rlp_without_reads.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_rlp_with_reads.json"
+    filepath = os.path.join(project_root, "bal_raw", "rlp", filename)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
 

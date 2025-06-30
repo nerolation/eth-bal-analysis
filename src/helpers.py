@@ -1,6 +1,6 @@
 import pandas as pd
 import requests
-import snappy
+import snappy as snappy_compression
 import rlp
 import ssz
 
@@ -55,14 +55,14 @@ def parse_hex_or_zero(x):
 
 
 def get_compressed_size(obj, extra_data=None):
-    compressed_data = snappy.compress(obj)
+    compressed_data = snappy_compression.compress(obj)
     compressed_size = len(compressed_data)
 
     # If extra data is provided (like contract code), compress that too
     if extra_data:
         for data in extra_data:
             if data:
-                compressed_size += len(snappy.compress(data))
+                compressed_size += len(snappy_compression.compress(data))
 
     return compressed_size / 1024
 
@@ -230,9 +230,9 @@ def fetch_block_with_transactions(block_number, rpc_url):
     return data["result"]
 
 
-def fetch_transaction_receipts(block_number, rpc_url):
+def fetch_transaction_receipts_batch(block_number, rpc_url):
     """
-    Fetch all transaction receipts for a block.
+    Fetch all transaction receipts for a block using batch requests.
     
     Args:
         block_number: The block number to fetch receipts for
@@ -241,25 +241,50 @@ def fetch_transaction_receipts(block_number, rpc_url):
     Returns:
         list: Transaction receipts in block order
     """
-    # First get the block to get transaction hashes
-    block = fetch_block_with_transactions(block_number, rpc_url)
+    # Try eth_getBlockReceipts first (faster if supported)
+    block_number_hex = hex(block_number)
+    payload = {
+        "method": "eth_getBlockReceipts",
+        "params": [block_number_hex],
+        "id": 1,
+        "jsonrpc": "2.0",
+    }
+    response = requests.post(rpc_url, json=payload)
+    data = response.json()
     
-    receipts = []
-    for tx in block.get("transactions", []):
-        tx_hash = tx["hash"]
-        payload = {
+    if "error" not in data and data.get("result"):
+        return data["result"]
+    
+    # Fallback: batch individual receipt requests
+    block = fetch_block_with_transactions(block_number, rpc_url)
+    tx_hashes = [tx["hash"] for tx in block.get("transactions", [])]
+    
+    if not tx_hashes:
+        return []
+    
+    # Create batch request
+    batch_payload = []
+    for i, tx_hash in enumerate(tx_hashes):
+        batch_payload.append({
             "method": "eth_getTransactionReceipt",
             "params": [tx_hash],
-            "id": 1,
+            "id": i + 1,
             "jsonrpc": "2.0",
-        }
-        response = requests.post(rpc_url, json=payload)
-        data = response.json()
-        if "error" in data:
-            raise Exception(f"RPC Error for receipt {tx_hash}: {data['error']}")
-        receipts.append(data["result"])
+        })
     
-    return receipts
+    response = requests.post(rpc_url, json=batch_payload)
+    batch_data = response.json()
+    
+    # Sort responses by id to maintain order
+    if isinstance(batch_data, list):
+        receipts = [None] * len(tx_hashes)
+        for item in batch_data:
+            if "error" in item:
+                raise Exception(f"RPC Error for receipt: {item['error']}")
+            receipts[item["id"] - 1] = item["result"]
+        return receipts
+    else:
+        raise Exception(f"Batch RPC Error: {batch_data.get('error', 'Unknown error')}")
 
 
 def identify_simple_eth_transfers(block_number, rpc_url):
@@ -274,7 +299,7 @@ def identify_simple_eth_transfers(block_number, rpc_url):
         dict: Maps tx_index to dict with 'from' and 'to' addresses for simple transfers
     """
     block = fetch_block_with_transactions(block_number, rpc_url)
-    receipts = fetch_transaction_receipts(block_number, rpc_url)
+    receipts = fetch_transaction_receipts_batch(block_number, rpc_url)
     
     simple_transfers = {}
     
