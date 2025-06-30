@@ -187,15 +187,6 @@ class BALBuilder:
         account_changes_list = []
         
         for address, changes in self.accounts.items():
-            if (
-                not changes['storage_changes']
-                and not changes['storage_reads']
-                and not changes['balance_changes']
-                and not changes['nonce_changes']
-                and not changes['code_changes']
-            ):
-                continue
-
             # Build storage changes
             storage_changes = []
             for slot, slot_changes in changes['storage_changes'].items():

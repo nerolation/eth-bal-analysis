@@ -36,10 +36,8 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
     all_addresses = pres.union(posts)
     balance_delta = {}
     for addr in all_addresses:
-        if addr not in post_balances:
-            continue
         pre_balance = pre_balances.get(addr, 0)
-        post_balance = post_balances.get(addr, 0)
+        post_balance = post_balances.get(addr, pre_balance)
         delta = post_balance - pre_balance
         if delta != 0:  # Include all non-zero deltas (positive and negative)
             balance_delta[addr] = delta
