@@ -203,3 +203,98 @@ def analyze_component_sizes(ssz_components, rlp_components, component_names):
             }
     
     return analysis
+
+
+def fetch_block_with_transactions(block_number, rpc_url):
+    """
+    Fetch block data including full transaction objects.
+    
+    Args:
+        block_number: The block number to fetch
+        rpc_url: The RPC endpoint URL
+        
+    Returns:
+        dict: Block data with full transaction objects
+    """
+    block_number_hex = hex(block_number)
+    payload = {
+        "method": "eth_getBlockByNumber",
+        "params": [block_number_hex, True],  # True to include full transaction objects
+        "id": 1,
+        "jsonrpc": "2.0",
+    }
+    response = requests.post(rpc_url, json=payload)
+    data = response.json()
+    if "error" in data:
+        raise Exception(f"RPC Error: {data['error']}")
+    return data["result"]
+
+
+def fetch_transaction_receipts(block_number, rpc_url):
+    """
+    Fetch all transaction receipts for a block.
+    
+    Args:
+        block_number: The block number to fetch receipts for
+        rpc_url: The RPC endpoint URL
+        
+    Returns:
+        list: Transaction receipts in block order
+    """
+    # First get the block to get transaction hashes
+    block = fetch_block_with_transactions(block_number, rpc_url)
+    
+    receipts = []
+    for tx in block.get("transactions", []):
+        tx_hash = tx["hash"]
+        payload = {
+            "method": "eth_getTransactionReceipt",
+            "params": [tx_hash],
+            "id": 1,
+            "jsonrpc": "2.0",
+        }
+        response = requests.post(rpc_url, json=payload)
+        data = response.json()
+        if "error" in data:
+            raise Exception(f"RPC Error for receipt {tx_hash}: {data['error']}")
+        receipts.append(data["result"])
+    
+    return receipts
+
+
+def identify_simple_eth_transfers(block_number, rpc_url):
+    """
+    Identify simple ETH transfers (21k gas limit, 21k gas used).
+    
+    Args:
+        block_number: The block number to analyze
+        rpc_url: The RPC endpoint URL
+        
+    Returns:
+        dict: Maps tx_index to dict with 'from' and 'to' addresses for simple transfers
+    """
+    block = fetch_block_with_transactions(block_number, rpc_url)
+    receipts = fetch_transaction_receipts(block_number, rpc_url)
+    
+    simple_transfers = {}
+    
+    for tx_index, (tx, receipt) in enumerate(zip(block.get("transactions", []), receipts)):
+        # Check if this is a simple ETH transfer
+        # Conditions:
+        # 1. Gas limit is 21000
+        # 2. Gas used is 21000
+        # 3. No input data (or empty input data)
+        gas_limit = int(tx.get("gas", "0x0"), 16)
+        gas_used = int(receipt.get("gasUsed", "0x0"), 16)
+        input_data = tx.get("input", "0x")
+        
+        if (gas_limit == 21000 and 
+            gas_used == 21000 and 
+            (input_data == "0x" or input_data == "")):
+            # This is a simple ETH transfer
+            simple_transfers[tx_index] = {
+                "from": tx["from"].lower(),
+                "to": tx.get("to", "").lower() if tx.get("to") else None
+            }
+    
+    return simple_transfers

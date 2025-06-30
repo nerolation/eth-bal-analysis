@@ -14,6 +14,7 @@ sys.path.insert(0, src_dir)
 
 from BALs import *
 from helpers import *
+from helpers import identify_simple_eth_transfers
 
 rpc_file = os.path.join(project_root, "rpc.txt")
 with open(rpc_file, "r") as file:
@@ -43,8 +44,15 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
             balance_delta[addr] = delta
     return balance_delta
 
-def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses: set):
-    """Extract balance changes and add them to the builder."""
+def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses: set, simple_transfers: dict = None):
+    """Extract balance changes and add them to the builder.
+    
+    Args:
+        trace_result: The trace result from debug_traceBlockByNumber
+        builder: The BALBuilder instance
+        touched_addresses: Set to track all touched addresses
+        simple_transfers: Dict mapping tx_index to simple transfer info (from/to addresses)
+    """
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
@@ -60,7 +68,16 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
         for address in all_balance_addresses:
             touched_addresses.add(address.lower())
 
+        # Check if this is a simple ETH transfer
+        is_simple_transfer = simple_transfers and tx_id in simple_transfers
+        
         for address, delta_val in balance_delta.items():
+            # Skip balance changes for sender and recipient of simple ETH transfers
+            if is_simple_transfer:
+                transfer_info = simple_transfers[tx_id]
+                if address.lower() in (transfer_info["from"], transfer_info["to"]):
+                    continue
+            
             canonical = to_canonical_address(address)
             # Calculate post balance for this address
             post_balance = post_balances.get(address, 0)
@@ -408,9 +425,15 @@ def main():
         # Collect all touched addresses
         touched_addresses = collect_touched_addresses(trace_result)
         
+        # Identify simple ETH transfers
+        print(f"  Identifying simple ETH transfers for block {block_number}...")
+        simple_transfers = identify_simple_eth_transfers(block_number, RPC_URL)
+        if simple_transfers:
+            print(f"    Found {len(simple_transfers)} simple ETH transfers")
+        
         # Extract all components into the builder
         process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder)
-        process_balance_changes(trace_result, builder, touched_addresses)
+        process_balance_changes(trace_result, builder, touched_addresses, simple_transfers)
         process_code_changes(trace_result, builder)
         process_nonce_changes(trace_result, builder)
         
@@ -428,8 +451,8 @@ def main():
         # Encode the entire block
         full_block_encoded = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
 
-        # Create bal_raw/ssz directory
-        bal_raw_dir = os.path.join(project_root, "bal_raw", "ssz")
+        # Create bal_raw/ssz_new directory for new implementation
+        bal_raw_dir = os.path.join(project_root, "bal_raw", "ssz_new")
         os.makedirs(bal_raw_dir, exist_ok=True)
         
         # Create filename indicating with/without reads
@@ -470,8 +493,8 @@ def main():
         block_totals.append(component_sizes["total_kb"])
 
     # Save JSON to file with appropriate name based on reads flag
-    filename = "bal_analysis_without_reads.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads.json"
-    filepath = os.path.join(project_root, "bal_raw", "ssz", filename)
+    filename = "bal_analysis_without_reads_new.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads_new.json"
+    filepath = os.path.join(project_root, "bal_raw", "ssz_new", filename)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
 
