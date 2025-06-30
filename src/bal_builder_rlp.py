@@ -23,10 +23,11 @@ with open(rpc_file, "r") as file:
 IGNORE_STORAGE_LOCATIONS = False
 
 def extract_balances(state):
-    return {
-        addr: parse_hex_or_zero(changes.get("balance"))
-        for addr, changes in state.items()
-    }
+    balances = {}
+    for addr, changes in state.items():
+        if "balance" in changes:
+            balances[addr] = parse_hex_or_zero(changes["balance"])
+    return balances
 
 def parse_pre_and_post_balances(pre_state, post_state):
     return extract_balances(pre_state), extract_balances(post_state)
@@ -36,7 +37,7 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
     balance_delta = {}
     for addr in all_addresses:
         pre_balance = pre_balances.get(addr, 0)
-        post_balance = post_balances.get(addr, 0)
+        post_balance = post_balances.get(addr, pre_balance)
         delta = post_balance - pre_balance
         if delta != 0:  # Include all non-zero deltas (positive and negative)
             balance_delta[addr] = delta
