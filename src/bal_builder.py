@@ -14,7 +14,6 @@ sys.path.insert(0, src_dir)
 
 from BALs import *
 from helpers import *
-from helpers import identify_simple_eth_transfers
 
 rpc_file = os.path.join(project_root, "rpc.txt")
 with open(rpc_file, "r") as file:
@@ -44,14 +43,13 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
             balance_delta[addr] = delta
     return balance_delta
 
-def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses: set, simple_transfers: dict = None):
+def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses: set):
     """Extract balance changes and add them to the builder.
     
     Args:
         trace_result: The trace result from debug_traceBlockByNumber
         builder: The BALBuilder instance
         touched_addresses: Set to track all touched addresses
-        simple_transfers: Dict mapping tx_index to simple transfer info (from/to addresses)
     """
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
@@ -68,16 +66,8 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
         for address in all_balance_addresses:
             touched_addresses.add(address.lower())
 
-        # Check if this is a simple ETH transfer
-        is_simple_transfer = simple_transfers and tx_id in simple_transfers
-        
+        # Process all balance changes
         for address, delta_val in balance_delta.items():
-            # Skip balance changes for sender and recipient of simple ETH transfers
-            if is_simple_transfer:
-                transfer_info = simple_transfers[tx_id]
-                if address.lower() in (transfer_info["from"], transfer_info["to"]):
-                    continue
-            
             canonical = to_canonical_address(address)
             # Calculate post balance for this address
             post_balance = post_balances.get(address, 0)
@@ -237,31 +227,14 @@ def _get_nonce(info: dict, fallback: str = "0") -> int:
     nonce_str = info.get("nonce", fallback)
     return int(nonce_str, 16) if isinstance(nonce_str, str) and nonce_str.startswith('0x') else int(nonce_str)
 
-def _should_record_nonce_diff(pre_info: dict, post_info: dict) -> bool:
-    """Determine whether a nonce diff should be recorded.
-    
-    Per EIP-7928, we only record nonce changes for contracts that perform
-    CREATE/CREATE2 operations. We do NOT record nonce changes that can be
-    statically inferred from the block:
-    - Transaction sender nonce increments
-    - Type 4 transaction 'to' address nonce increments
-    
-    This function assumes it's called for accounts that have code (contracts).
-    """
-    if "nonce" not in pre_info or "code" not in pre_info:
-        return False
-
-    # Only record if this is a contract (has code)
-    if not pre_info.get("code") or pre_info["code"] in ("", "0x", "0x0"):
-        return False
-
-    pre_nonce_str = pre_info["nonce"]
-    pre_nonce = int(pre_nonce_str, 16) if isinstance(pre_nonce_str, str) and pre_nonce_str.startswith('0x') else int(pre_nonce_str)
-    post_nonce = _get_nonce(post_info, fallback=str(pre_nonce))
-    return post_nonce > pre_nonce
-
 def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilder):
-    """Extract nonce changes and add them to the builder."""
+    """Extract all nonce changes and add them to the builder.
+    
+    Captures all statically inferrable nonce changes:
+    - EOA/sender nonce increments 
+    - New contracts (nonce 1)
+    - EIP-7702 delegations
+    """
     for tx_index, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
@@ -270,15 +243,25 @@ def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilde
         pre_state = result.get("pre", {})
         post_state = result.get("post", {})
 
+        # Process existing addresses with nonce changes
         for address_hex, pre_info in pre_state.items():
             post_info = post_state.get(address_hex, {})
-            if not _should_record_nonce_diff(pre_info, post_info):
-                continue
             
-            post_nonce = _get_nonce(post_info, fallback=pre_info["nonce"])
-            canonical = to_canonical_address(address_hex)
-            # Follows pattern: address -> nonce -> tx_index -> new_nonce
-            builder.add_nonce_change(canonical, tx_index, post_nonce)
+            if "nonce" in pre_info:
+                pre_nonce = _get_nonce(pre_info)
+                post_nonce = _get_nonce(post_info, fallback=pre_info["nonce"])
+                
+                if post_nonce > pre_nonce:
+                    canonical = to_canonical_address(address_hex)
+                    builder.add_nonce_change(canonical, tx_index, post_nonce)
+        
+        # Process new addresses that appear only in post_state (new contracts, EIP-7702)
+        for address_hex, post_info in post_state.items():
+            if address_hex not in pre_state and "nonce" in post_info:
+                post_nonce = _get_nonce(post_info)
+                if post_nonce > 0:  # New address with non-zero nonce
+                    canonical = to_canonical_address(address_hex)
+                    builder.add_nonce_change(canonical, tx_index, post_nonce)
 
 def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
     """Collect all addresses that were touched during execution (including read-only access)."""
@@ -298,142 +281,6 @@ def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
             touched.add(addr.lower())
     
     return touched
-
-def identify_simple_eth_transfers_from_trace(trace_result: List[dict]) -> Dict[int, Dict[str, str]]:
-    """
-    Identify simple ETH transfers using the trace data we already have.
-    
-    A simple ETH transfer is characterized by:
-    1. Only balance changes (no storage, code, or nonce changes beyond sender nonce)
-    2. One sender (balance decreases, nonce increases by 1)
-    3. May have fee recipient (miner/validator) - balance increases, no nonce change
-    4. Recipient may not appear in state diff if they don't have prior balance
-    5. No contract code deployment or execution
-    
-    Args:
-        trace_result: The trace result from debug_traceBlockByNumber
-        
-    Returns:
-        dict: Maps tx_index to dict with 'from' and 'to' addresses for simple transfers
-    """
-    simple_transfers = {}
-    
-    for tx_id, tx in enumerate(trace_result):
-        result = tx.get("result")
-        if not isinstance(result, dict):
-            continue
-            
-        pre_state = result.get("pre", {})
-        post_state = result.get("post", {})
-        
-        # Get all addresses involved in this transaction
-        all_addresses = set(pre_state.keys()) | set(post_state.keys())
-        
-        # For simple ETH transfers, we expect 1-3 addresses:
-        # - Sender (always present)
-        # - Recipient (may not be in state diff if new account)
-        # - Fee recipient/miner (usually present)
-        if len(all_addresses) == 0 or len(all_addresses) > 3:
-            continue
-            
-        # Check that only balance changes occurred (no storage, code changes)
-        is_simple_transfer = True
-        sender_addr = None
-        potential_recipients = []
-        fee_recipient = None
-        
-        for addr in all_addresses:
-            pre_info = pre_state.get(addr, {})
-            post_info = post_state.get(addr, {})
-            
-            # Check for storage changes
-            pre_storage = pre_info.get("storage", {})
-            post_storage = post_info.get("storage", {})
-            if pre_storage or post_storage:
-                is_simple_transfer = False
-                break
-                
-            # Check for code changes
-            pre_code = pre_info.get("code", "")
-            post_code = post_info.get("code", "")
-            if pre_code != post_code:
-                is_simple_transfer = False
-                break
-                
-            # Check balance changes
-            pre_balance = parse_hex_or_zero(pre_info.get("balance", "0"))
-            post_balance = parse_hex_or_zero(post_info.get("balance", "0"))
-            balance_delta = post_balance - pre_balance
-            
-            # Check nonce changes
-            pre_nonce_val = pre_info.get("nonce", "0")
-            post_nonce_val = post_info.get("nonce", pre_nonce_val)  # Default to pre value if missing
-            
-            if isinstance(pre_nonce_val, str) and pre_nonce_val.startswith("0x"):
-                pre_nonce = int(pre_nonce_val, 16)
-            else:
-                pre_nonce = int(pre_nonce_val)
-                
-            if isinstance(post_nonce_val, str) and post_nonce_val.startswith("0x"):
-                post_nonce = int(post_nonce_val, 16)
-            else:
-                post_nonce = int(post_nonce_val)
-                
-            nonce_delta = post_nonce - pre_nonce
-            
-            # Classify the address role
-            if balance_delta < 0 and nonce_delta == 1:
-                # This is the sender (lost balance and nonce increased)
-                if sender_addr is not None:
-                    # Multiple senders - not a simple transfer
-                    is_simple_transfer = False
-                    break
-                sender_addr = addr.lower()
-            elif balance_delta > 0 and nonce_delta == 0:
-                # This could be recipient or fee recipient
-                potential_recipients.append(addr.lower())
-            elif balance_delta == 0 and nonce_delta == 0:
-                # Account appeared but no changes - possible recipient with 0 previous balance
-                potential_recipients.append(addr.lower())
-            else:
-                # Unexpected pattern - not a simple transfer
-                is_simple_transfer = False
-                break
-        
-        # Validate we found exactly one sender
-        if not is_simple_transfer or sender_addr is None:
-            continue
-            
-        # For simple transfers, handle the main case we can detect:
-        # Sender exists and we have 1-2 additional addresses that gained balance
-        if len(all_addresses) >= 1 and sender_addr is not None:
-            # Check if we can identify a clear recipient (gained significant balance)
-            recipient_found = False
-            
-            if len(potential_recipients) == 1:
-                # Only one potential recipient - could be the actual recipient
-                recipient_addr = potential_recipients[0]
-                recipient_pre = pre_state.get(recipient_addr, {})
-                recipient_post = post_state.get(recipient_addr, {})
-                recipient_pre_balance = parse_hex_or_zero(recipient_pre.get("balance", "0"))
-                recipient_post_balance = parse_hex_or_zero(recipient_post.get("balance", "0"))
-                
-                if recipient_post_balance > recipient_pre_balance:
-                    simple_transfers[tx_id] = {
-                        "from": sender_addr,
-                        "to": recipient_addr
-                    }
-                    recipient_found = True
-                    
-            # If we couldn't identify a clear recipient, it might be a transfer to a new account
-            if not recipient_found:
-                # This is likely a simple transfer where recipient is new (not in state diff)
-                simple_transfers[tx_id] = {
-                    "from": sender_addr,
-                    "to": "unknown_new_account"  # Placeholder
-                }
-    
-    return simple_transfers
 
 def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
     """Sort the block access list for deterministic encoding."""
@@ -537,7 +384,7 @@ def main():
     # Set IGNORE_STORAGE_LOCATIONS based on command line flag
     IGNORE_STORAGE_LOCATIONS = args.no_reads
     
-    print(f"Running SSZ BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
+    print(f"Running simplified SSZ BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
     totals = defaultdict(list)
     block_totals = []
     data = []
@@ -561,15 +408,9 @@ def main():
         # Collect all touched addresses
         touched_addresses = collect_touched_addresses(trace_result)
         
-        # Identify simple ETH transfers using gas-based method (correct)
-        print(f"  Identifying simple ETH transfers for block {block_number}...")
-        simple_transfers = identify_simple_eth_transfers(block_number, RPC_URL)
-        if simple_transfers:
-            print(f"    Found {len(simple_transfers)} simple ETH transfers")
-        
         # Extract all components into the builder
         process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder)
-        process_balance_changes(trace_result, builder, touched_addresses, simple_transfers)
+        process_balance_changes(trace_result, builder, touched_addresses)
         process_code_changes(trace_result, builder)
         process_nonce_changes(trace_result, builder)
         
@@ -593,7 +434,7 @@ def main():
         
         # Create filename indicating with/without reads
         reads_suffix = "without_reads" if IGNORE_STORAGE_LOCATIONS else "with_reads"
-        filename = f"{block_number}_block_access_list_{reads_suffix}.txt"
+        filename = f"{block_number}_block_access_list_{reads_suffix}_simplified.txt"
         filepath = os.path.join(bal_raw_dir, filename)
         
         with open(filepath, "wb") as f:
@@ -629,7 +470,7 @@ def main():
         block_totals.append(component_sizes["total_kb"])
 
     # Save JSON to file with appropriate name based on reads flag
-    filename = "bal_analysis_without_reads.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads.json"
+    filename = "bal_analysis_without_reads_simplified.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads_simplified.json"
     filepath = os.path.join(project_root, "bal_raw", "ssz", filename)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
@@ -648,11 +489,15 @@ def main():
         avg_accounts = sum(d["bal_stats"]["total_accounts"] for d in data) / len(data)
         avg_storage_writes = sum(d["bal_stats"]["total_storage_writes"] for d in data) / len(data)
         avg_storage_reads = sum(d["bal_stats"]["total_storage_reads"] for d in data) / len(data)
+        avg_balance_changes = sum(d["bal_stats"]["total_balance_changes"] for d in data) / len(data)
+        avg_nonce_changes = sum(d["bal_stats"]["total_nonce_changes"] for d in data) / len(data)
         
         print(f"\nEfficiency stats:")
         print(f"Average accounts per block: {avg_accounts:.1f}")
         print(f"Average storage writes per block: {avg_storage_writes:.1f}")
         print(f"Average storage reads per block: {avg_storage_reads:.1f}")
+        print(f"Average balance changes per block: {avg_balance_changes:.1f}")
+        print(f"Average nonce changes per block: {avg_nonce_changes:.1f}")
 
 if __name__ == "__main__":
     main()
