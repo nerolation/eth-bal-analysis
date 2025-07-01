@@ -65,6 +65,14 @@ When comparing SSZ vs RLP encoding without reads:
 Including storage reads significantly increases BAL size:
 - SSZ: 48.1% size increase when including reads
 
+## Recommendations
+
+Based on the analysis:
+
+1. **For minimal size**: Use the more compact encoding format without reads
+2. **For parallel execution**: Include reads for complete access information
+3. **Encoding choice**: Consider the size vs compatibility trade-offs between SSZ and RLP
+
 ## Technical Implementation Notes
 
 - All measurements use Snappy compression
