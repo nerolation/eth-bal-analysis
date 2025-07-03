@@ -3,7 +3,7 @@ import json
 from typing import Dict, List as PyList, Optional, Tuple
 
 from ssz import Serializable
-from ssz.sedes import ByteVector, ByteList, uint16, uint32, uint64, List as SSZList
+from ssz.sedes import ByteVector, ByteList, uint16, uint32, uint64, uint128, List as SSZList
 
 # Constants; chosen to support a 630m block gas limit
 MAX_TXS = 30_000
@@ -11,14 +11,14 @@ MAX_SLOTS = 300_000
 MAX_ACCOUNTS = 300_000
 MAX_CODE_SIZE = 24_576  # Maximum contract bytecode size in bytes
 
-# SSZ type aliases
-Address = ByteVector(20)
-StorageKey = ByteVector(32)
-StorageValue = ByteVector(32)
+# SSZ type aliases per latest EIP-7928
+Address = ByteVector(20)  # Bytes20
+StorageKey = ByteVector(32)  # Bytes32
+StorageValue = ByteVector(32)  # Bytes32
 TxIndex = uint16
-Balance = ByteVector(12)  # Post balance value (12 bytes sufficient for total ETH supply)
+Balance = uint128  # Changed from ByteVector(12) to uint128
 Nonce = uint64
-CodeData = ByteList(MAX_CODE_SIZE)
+CodeData = ByteList(MAX_CODE_SIZE)  # List[byte, MAX_CODE_SIZE]
 
 def parse_hex_or_zero(x):
     if pd.isna(x) or x is None:
@@ -26,7 +26,7 @@ def parse_hex_or_zero(x):
     return int(x, 16)
 
 # =============================================================================
-# CORE CHANGE STRUCTURES (no redundant keys)
+# CORE CHANGE STRUCTURES (latest EIP-7928 format)
 # =============================================================================
 
 class StorageChange(Serializable):
@@ -40,7 +40,7 @@ class BalanceChange(Serializable):
     """Single balance change: tx_index -> post_balance"""
     fields = [
         ('tx_index', TxIndex),
-        ('post_balance', Balance),
+        ('post_balance', Balance),  # Now uint128
     ]
 
 class NonceChange(Serializable):
@@ -58,58 +58,47 @@ class CodeChange(Serializable):
     ]
 
 # =============================================================================
-# SLOT-LEVEL MAPPING (eliminates slot key redundancy)
+# STORAGE ACCESS TRACKING (simplified per latest EIP-7928)
 # =============================================================================
 
-class SlotChanges(Serializable):
-    """All changes to a single storage slot"""
+class StorageAccess(Serializable):
+    """Storage access for a single slot with all changes"""
     fields = [
         ('slot', StorageKey),
-        ('changes', SSZList(StorageChange, MAX_TXS)),  # Only changes, no redundant slot
+        ('changes', SSZList(StorageChange, MAX_TXS)),
     ]
 
-class SlotRead(Serializable):
-    """Read-only access to a storage slot (no changes)"""
+class StorageRead(Serializable):
+    """Read-only access to a storage slot"""
     fields = [
         ('slot', StorageKey),
     ]
 
 # =============================================================================
-# ACCOUNT-LEVEL MAPPING (groups all account changes)
+# ACCOUNT-LEVEL STRUCTURE (simplified per latest EIP-7928)
 # =============================================================================
 
 class AccountChanges(Serializable):
     """
-    All changes for a single account, grouped by field type.
-    This eliminates address redundancy across different change types.
+    All changes for a single account per latest EIP-7928.
+    More direct structure without nested containers.
     """
     fields = [
         ('address', Address),
-        
-        # Storage changes (slot -> [tx_index -> new_value])
-        ('storage_changes', SSZList(SlotChanges, MAX_SLOTS)),
-        ('storage_reads', SSZList(SlotRead, MAX_SLOTS)),
-        
-        # Balance changes ([tx_index -> post_balance])
+        ('storage_writes', SSZList(StorageAccess, MAX_SLOTS)),
+        ('storage_reads', SSZList(StorageRead, MAX_SLOTS)),
         ('balance_changes', SSZList(BalanceChange, MAX_TXS)),
-        
-        # Nonce changes ([tx_index -> new_nonce])
         ('nonce_changes', SSZList(NonceChange, MAX_TXS)),
-        
-        # Code changes ([tx_index -> new_code]) - typically 0 or 1
         ('code_changes', SSZList(CodeChange, MAX_TXS)),
     ]
 
 # =============================================================================
-# BLOCK-LEVEL STRUCTURE (simple list of account changes)
+# BLOCK-LEVEL STRUCTURE
 # =============================================================================
 
 class BlockAccessList(Serializable):
     """
-    Block Access List structure for EIP-7928.
-    
-    Account-centric design that groups all changes by address,
-    eliminating redundancy and providing optimal encoding efficiency.
+    Block Access List structure for latest EIP-7928.
     """
     fields = [
         ('account_changes', SSZList(AccountChanges, MAX_ACCOUNTS)),
@@ -122,9 +111,7 @@ class BlockAccessList(Serializable):
 class BALBuilder:
     """
     Builder for constructing BlockAccessList efficiently.
-    
-    Follows the natural transaction pattern:
-    address -> field -> tx_index -> change
+    Updated for latest EIP-7928 format.
     """
     
     def __init__(self):
@@ -135,7 +122,7 @@ class BALBuilder:
         """Ensure account exists in builder."""
         if address not in self.accounts:
             self.accounts[address] = {
-                'storage_changes': {},  # slot -> [StorageChange]
+                'storage_writes': {},  # slot -> [StorageChange]
                 'storage_reads': set(), # set of slots  
                 'balance_changes': [],  # [BalanceChange]
                 'nonce_changes': [],    # [NonceChange]
@@ -146,21 +133,25 @@ class BALBuilder:
         """Add storage write: address -> slot -> tx_index -> new_value"""
         self._ensure_account(address)
         
-        if slot not in self.accounts[address]['storage_changes']:
-            self.accounts[address]['storage_changes'][slot] = []
+        if slot not in self.accounts[address]['storage_writes']:
+            self.accounts[address]['storage_writes'][slot] = []
             
         change = StorageChange(tx_index=tx_index, new_value=new_value)
-        self.accounts[address]['storage_changes'][slot].append(change)
+        self.accounts[address]['storage_writes'][slot].append(change)
     
     def add_storage_read(self, address: bytes, slot: bytes):
         """Add storage read: address -> slot (read-only)"""
         self._ensure_account(address)
         self.accounts[address]['storage_reads'].add(slot)
     
-    def add_balance_change(self, address: bytes, tx_index: int, post_balance: bytes):
-        """Add balance change: address -> balance -> tx_index -> post_balance"""
+    def add_balance_change(self, address: bytes, tx_index: int, post_balance: int):
+        """Add balance change: address -> balance -> tx_index -> post_balance (as uint128)"""
         self._ensure_account(address)
         
+        # Ensure balance fits in uint128
+        if post_balance > 2**128 - 1:
+            raise ValueError(f"Balance {post_balance} exceeds uint128 max")
+            
         change = BalanceChange(tx_index=tx_index, post_balance=post_balance)
         self.accounts[address]['balance_changes'].append(change)
     
@@ -179,7 +170,7 @@ class BALBuilder:
         self.accounts[address]['code_changes'].append(change)
     
     def add_touched_account(self, address: bytes):
-        """Add an account that was touched but not changed (e.g., for EXTCODEHASH, BALANCE checks)"""
+        """Add an account that was touched but not changed"""
         self._ensure_account(address)
     
     def build(self, ignore_reads: bool = False) -> BlockAccessList:
@@ -187,20 +178,20 @@ class BALBuilder:
         account_changes_list = []
         
         for address, changes in self.accounts.items():
-            # Build storage changes
-            storage_changes = []
-            for slot, slot_changes in changes['storage_changes'].items():
+            # Build storage writes
+            storage_writes = []
+            for slot, slot_changes in changes['storage_writes'].items():
                 # Sort changes by tx_index for deterministic encoding
                 sorted_changes = sorted(slot_changes, key=lambda x: x.tx_index)
-                storage_changes.append(SlotChanges(slot=slot, changes=sorted_changes))
+                storage_writes.append(StorageAccess(slot=slot, changes=sorted_changes))
             
             # Build storage reads (only if not ignoring reads)
             storage_reads = []
             if not ignore_reads:
                 for slot in changes['storage_reads']:
                     # Only include reads for slots that weren't written to
-                    if slot not in changes['storage_changes']:
-                        storage_reads.append(SlotRead(slot=slot))
+                    if slot not in changes['storage_writes']:
+                        storage_reads.append(StorageRead(slot=slot))
             
             # Sort all changes by tx_index for deterministic encoding
             balance_changes = sorted(changes['balance_changes'], key=lambda x: x.tx_index)
@@ -210,7 +201,7 @@ class BALBuilder:
             # Create account changes object
             account_change = AccountChanges(
                 address=address,
-                storage_changes=storage_changes,
+                storage_writes=storage_writes,
                 storage_reads=storage_reads,
                 balance_changes=balance_changes,
                 nonce_changes=nonce_changes,
@@ -249,10 +240,10 @@ def get_account_stats(bal: BlockAccessList) -> Dict[str, int]:
     }
     
     for account in bal.account_changes:
-        if account.storage_changes:
+        if account.storage_writes:
             stats['accounts_with_storage_writes'] += 1
-            for slot_changes in account.storage_changes:
-                stats['total_storage_writes'] += len(slot_changes.changes)
+            for storage_access in account.storage_writes:
+                stats['total_storage_writes'] += len(storage_access.changes)
         
         if account.storage_reads:
             stats['accounts_with_storage_reads'] += 1
@@ -271,4 +262,3 @@ def get_account_stats(bal: BlockAccessList) -> Dict[str, int]:
             stats['total_code_changes'] += len(account.code_changes)
     
     return stats
-

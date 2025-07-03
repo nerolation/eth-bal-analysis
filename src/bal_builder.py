@@ -66,13 +66,13 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
         for address in all_balance_addresses:
             touched_addresses.add(address.lower())
 
-        # Process all balance changes
+        # Process all balance changes - now using uint128 instead of bytes
         for address, delta_val in balance_delta.items():
             canonical = to_canonical_address(address)
             # Calculate post balance for this address
             post_balance = post_balances.get(address, 0)
-            post_balance_bytes = post_balance.to_bytes(12, "big", signed=False)
-            builder.add_balance_change(canonical, tx_id, post_balance_bytes)
+            # Pass as integer for uint128 type
+            builder.add_balance_change(canonical, tx_id, post_balance)
 
 def extract_non_empty_code(state: dict, address: str) -> Optional[str]:
     """Returns the code from state if it's non-empty, else None."""
@@ -287,13 +287,13 @@ def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
     sorted_accounts = []
     
     for account in sorted(bal.account_changes, key=lambda x: bytes(x.address)):
-        # Sort storage changes by slot and recreate with sorted changes
-        sorted_storage_changes = []
-        for slot_changes in sorted(account.storage_changes, key=lambda x: bytes(x.slot)):
-            # Sort changes within each slot by tx_index and recreate SlotChanges
-            sorted_changes = sorted(slot_changes.changes, key=lambda x: x.tx_index)
-            sorted_slot_changes = SlotChanges(slot=slot_changes.slot, changes=sorted_changes)
-            sorted_storage_changes.append(sorted_slot_changes)
+        # Sort storage writes by slot and recreate with sorted changes
+        sorted_storage_writes = []
+        for storage_access in sorted(account.storage_writes, key=lambda x: bytes(x.slot)):
+            # Sort changes within each slot by tx_index and recreate StorageAccess
+            sorted_changes = sorted(storage_access.changes, key=lambda x: x.tx_index)
+            sorted_storage_access = StorageAccess(slot=storage_access.slot, changes=sorted_changes)
+            sorted_storage_writes.append(sorted_storage_access)
         
         # Sort storage reads by slot
         sorted_storage_reads = sorted(account.storage_reads, key=lambda x: bytes(x.slot))
@@ -305,7 +305,7 @@ def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
         
         sorted_account = AccountChanges(
             address=account.address,
-            storage_changes=sorted_storage_changes,
+            storage_writes=sorted_storage_writes,
             storage_reads=sorted_storage_reads,
             balance_changes=sorted_balance_changes,
             nonce_changes=sorted_nonce_changes,
@@ -319,15 +319,15 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
     """Calculate component sizes for BAL structure."""
     
     # Encode each component separately to measure sizes
-    storage_changes_data = []
+    storage_writes_data = []
     storage_reads_data = []
     balance_changes_data = []
     nonce_changes_data = []
     code_changes_data = []
     
     for account in bal.account_changes:
-        if account.storage_changes:
-            storage_changes_data.extend(account.storage_changes)
+        if account.storage_writes:
+            storage_writes_data.extend(account.storage_writes)
         if account.storage_reads:
             storage_reads_data.extend(account.storage_reads)
         if account.balance_changes:
@@ -338,12 +338,12 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
             code_changes_data.extend(account.code_changes)
     
     # Calculate compressed sizes
-    storage_changes_size = get_compressed_size(
-        ssz.encode(storage_changes_data, sedes=SSZList(SlotChanges, MAX_SLOTS))
-    ) if storage_changes_data else 0
+    storage_writes_size = get_compressed_size(
+        ssz.encode(storage_writes_data, sedes=SSZList(StorageAccess, MAX_SLOTS))
+    ) if storage_writes_data else 0
     
     storage_reads_size = get_compressed_size(
-        ssz.encode(storage_reads_data, sedes=SSZList(SlotRead, MAX_SLOTS))
+        ssz.encode(storage_reads_data, sedes=SSZList(StorageRead, MAX_SLOTS))
     ) if storage_reads_data else 0
     
     balance_size = get_compressed_size(
@@ -359,11 +359,11 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
     ) if code_changes_data else 0
     
     # Total storage size combines writes and reads
-    total_storage_size = storage_changes_size + storage_reads_size
+    total_storage_size = storage_writes_size + storage_reads_size
     total_size = total_storage_size + balance_size + code_size + nonce_size
     
     return {
-        'storage_changes_kb': storage_changes_size,
+        'storage_writes_kb': storage_writes_size,
         'storage_reads_kb': storage_reads_size,
         'storage_total_kb': total_storage_size,
         'balance_diffs_kb': balance_size,
@@ -376,7 +376,7 @@ def main():
     global IGNORE_STORAGE_LOCATIONS
     
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks')
+    parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks using latest EIP-7928 format')
     parser.add_argument('--no-reads', action='store_true', 
                         help='Ignore storage read locations (only include writes)')
     args = parser.parse_args()
@@ -384,7 +384,7 @@ def main():
     # Set IGNORE_STORAGE_LOCATIONS based on command line flag
     IGNORE_STORAGE_LOCATIONS = args.no_reads
     
-    print(f"Running simplified SSZ BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
+    print(f"Running EIP-7928 SSZ BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
     totals = defaultdict(list)
     block_totals = []
     data = []
@@ -434,7 +434,7 @@ def main():
         
         # Create filename indicating with/without reads
         reads_suffix = "without_reads" if IGNORE_STORAGE_LOCATIONS else "with_reads"
-        filename = f"{block_number}_block_access_list_{reads_suffix}_simplified.txt"
+        filename = f"{block_number}_block_access_list_{reads_suffix}_eip7928.txt"
         filepath = os.path.join(bal_raw_dir, filename)
         
         with open(filepath, "wb") as f:
@@ -461,7 +461,7 @@ def main():
         })
 
         # Totals for averages
-        totals["storage_changes"].append(component_sizes["storage_changes_kb"])
+        totals["storage_writes"].append(component_sizes["storage_writes_kb"])
         totals["storage_reads"].append(component_sizes["storage_reads_kb"])
         totals["storage_total"].append(component_sizes["storage_total_kb"])
         totals["balance"].append(component_sizes["balance_diffs_kb"])
@@ -470,7 +470,7 @@ def main():
         block_totals.append(component_sizes["total_kb"])
 
     # Save JSON to file with appropriate name based on reads flag
-    filename = "bal_analysis_without_reads_simplified.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads_simplified.json"
+    filename = "bal_analysis_without_reads_eip7928.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads_eip7928.json"
     filepath = os.path.join(project_root, "bal_raw", "ssz", filename)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
