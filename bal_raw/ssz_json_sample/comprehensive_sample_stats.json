@@ -1,0 +1,13 @@
+{
+  "total_accounts": 5,
+  "accounts_with_storage_writes": 2,
+  "accounts_with_storage_reads": 2,
+  "accounts_with_balance_changes": 3,
+  "accounts_with_nonce_changes": 2,
+  "accounts_with_code_changes": 1,
+  "total_storage_writes": 4,
+  "total_storage_reads": 3,
+  "total_balance_changes": 5,
+  "total_nonce_changes": 4,
+  "total_code_changes": 1
+}
