@@ -1,0 +1,40 @@
+{
+  "account_changes": [
+    {
+      "address": "0x1234567890abcdef1234567890abcdef12345678",
+      "storage_writes": [
+        {
+          "slot": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "changes": [
+            {
+              "tx_index": 0,
+              "new_value": "0x0000000000000000000000000000000000000000000000000000000000000042"
+            }
+          ]
+        }
+      ],
+      "storage_reads": [],
+      "balance_changes": [],
+      "nonce_changes": [],
+      "code_changes": []
+    },
+    {
+      "address": "0xabcdef0123456789abcdef0123456789abcdef01",
+      "storage_writes": [],
+      "storage_reads": [],
+      "balance_changes": [
+        {
+          "tx_index": 1,
+          "post_balance": "0x00000000000000000000000000000001"
+        }
+      ],
+      "nonce_changes": [
+        {
+          "tx_index": 1,
+          "new_nonce": 1
+        }
+      ],
+      "code_changes": []
+    }
+  ]
+}
