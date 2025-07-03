@@ -16,7 +16,7 @@ Address = ByteVector(20)  # Bytes20
 StorageKey = ByteVector(32)  # Bytes32
 StorageValue = ByteVector(32)  # Bytes32
 TxIndex = uint16
-Balance = uint128  # Changed from ByteVector(12) to uint128
+Balance = ByteVector(16)  # bytes16 for balance differences
 Nonce = uint64
 CodeData = ByteList(MAX_CODE_SIZE)  # List[byte, MAX_CODE_SIZE]
 
@@ -68,11 +68,7 @@ class StorageAccess(Serializable):
         ('changes', SSZList(StorageChange, MAX_TXS)),
     ]
 
-class StorageRead(Serializable):
-    """Read-only access to a storage slot"""
-    fields = [
-        ('slot', StorageKey),
-    ]
+# StorageRead class removed - we now use StorageKey directly in storage_reads list
 
 # =============================================================================
 # ACCOUNT-LEVEL STRUCTURE (simplified per latest EIP-7928)
@@ -86,7 +82,7 @@ class AccountChanges(Serializable):
     fields = [
         ('address', Address),
         ('storage_writes', SSZList(StorageAccess, MAX_SLOTS)),
-        ('storage_reads', SSZList(StorageRead, MAX_SLOTS)),
+        ('storage_reads', SSZList(StorageKey, MAX_SLOTS)),
         ('balance_changes', SSZList(BalanceChange, MAX_TXS)),
         ('nonce_changes', SSZList(NonceChange, MAX_TXS)),
         ('code_changes', SSZList(CodeChange, MAX_TXS)),
@@ -144,13 +140,13 @@ class BALBuilder:
         self._ensure_account(address)
         self.accounts[address]['storage_reads'].add(slot)
     
-    def add_balance_change(self, address: bytes, tx_index: int, post_balance: int):
-        """Add balance change: address -> balance -> tx_index -> post_balance (as uint128)"""
+    def add_balance_change(self, address: bytes, tx_index: int, post_balance: bytes):
+        """Add balance change: address -> balance -> tx_index -> post_balance (as bytes16)"""
         self._ensure_account(address)
         
-        # Ensure balance fits in uint128
-        if post_balance > 2**128 - 1:
-            raise ValueError(f"Balance {post_balance} exceeds uint128 max")
+        # Ensure balance is exactly 16 bytes
+        if len(post_balance) != 16:
+            raise ValueError(f"Balance must be exactly 16 bytes, got {len(post_balance)}")
             
         change = BalanceChange(tx_index=tx_index, post_balance=post_balance)
         self.accounts[address]['balance_changes'].append(change)
@@ -191,7 +187,7 @@ class BALBuilder:
                 for slot in changes['storage_reads']:
                     # Only include reads for slots that weren't written to
                     if slot not in changes['storage_writes']:
-                        storage_reads.append(StorageRead(slot=slot))
+                        storage_reads.append(slot)
             
             # Sort all changes by tx_index for deterministic encoding
             balance_changes = sorted(changes['balance_changes'], key=lambda x: x.tx_index)

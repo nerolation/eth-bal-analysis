@@ -66,13 +66,14 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
         for address in all_balance_addresses:
             touched_addresses.add(address.lower())
 
-        # Process all balance changes - now using uint128 instead of bytes
+        # Process all balance changes - now using bytes16 format
         for address, delta_val in balance_delta.items():
             canonical = to_canonical_address(address)
             # Calculate post balance for this address
             post_balance = post_balances.get(address, 0)
-            # Pass as integer for uint128 type
-            builder.add_balance_change(canonical, tx_id, post_balance)
+            # Convert to bytes16 format
+            post_balance_bytes = post_balance.to_bytes(16, "big", signed=False)
+            builder.add_balance_change(canonical, tx_id, post_balance_bytes)
 
 def extract_non_empty_code(state: dict, address: str) -> Optional[str]:
     """Returns the code from state if it's non-empty, else None."""
@@ -295,8 +296,8 @@ def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
             sorted_storage_access = StorageAccess(slot=storage_access.slot, changes=sorted_changes)
             sorted_storage_writes.append(sorted_storage_access)
         
-        # Sort storage reads by slot
-        sorted_storage_reads = sorted(account.storage_reads, key=lambda x: bytes(x.slot))
+        # Sort storage reads by slot (storage_reads is now a list of StorageKey bytes)
+        sorted_storage_reads = sorted(account.storage_reads, key=lambda x: bytes(x))
         
         # Sort other changes by tx_index
         sorted_balance_changes = sorted(account.balance_changes, key=lambda x: x.tx_index)
@@ -343,7 +344,7 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
     ) if storage_writes_data else 0
     
     storage_reads_size = get_compressed_size(
-        ssz.encode(storage_reads_data, sedes=SSZList(StorageRead, MAX_SLOTS))
+        ssz.encode(storage_reads_data, sedes=SSZList(StorageKey, MAX_SLOTS))
     ) if storage_reads_data else 0
     
     balance_size = get_compressed_size(
