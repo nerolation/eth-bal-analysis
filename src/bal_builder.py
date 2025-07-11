@@ -20,7 +20,6 @@ rpc_file = os.path.join(project_root, "rpc.txt")
 with open(rpc_file, "r") as file:
     RPC_URL = file.read().strip()
 
-# Will be set based on command line arguments
 IGNORE_STORAGE_LOCATIONS = False
 
 def extract_balances(state):
@@ -65,11 +64,6 @@ def extract_balance_touches_from_block(block_number: int, rpc_url: str) -> Dict[
     return balance_touches
 
 def identify_gas_related_addresses(block_info: dict, tx_index: int) -> Tuple[Optional[str], Optional[str]]:
-    """Identify the sender and fee recipient for a transaction.
-    
-    Returns:
-        Tuple of (sender_address, fee_recipient_address)
-    """
     if not block_info or "transactions" not in block_info:
         return None, None
         
@@ -80,7 +74,6 @@ def identify_gas_related_addresses(block_info: dict, tx_index: int) -> Tuple[Opt
     tx = transactions[tx_index]
     sender = tx.get("from", "").lower() if tx.get("from") else None
     
-    # Fee recipient is the block's miner/fee recipient
     fee_recipient = block_info.get("miner", "").lower() if block_info.get("miner") else None
     
     return sender, fee_recipient
@@ -90,20 +83,9 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
                           reverted_tx_indices: set = None,
                           block_info: dict = None,
                           ignore_reads: bool = False):
-    """Extract balance changes and add them to the builder.
-    
-    Args:
-        trace_result: The trace result from debug_traceBlockByNumber (diff mode)
-        builder: The BALBuilder instance
-        touched_addresses: Set to track all touched addresses
-        balance_touches: Dict of tx_id -> set of addresses that had balance touches (from non-diff trace)
-        reverted_tx_indices: Set of transaction indices that were reverted
-        block_info: Block information including transactions (for identifying senders)
-    """
     if reverted_tx_indices is None:
         reverted_tx_indices = set()
         
-    # Track which addresses have been processed per transaction
     processed_per_tx = {}
     
     for tx_id, tx in enumerate(trace_result):
@@ -116,64 +98,47 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
         pres, posts = set(pre_balances.keys()), set(post_balances.keys())
         balance_delta = get_balance_delta(pres, posts, pre_balances, post_balances)
 
-        # Track all addresses that had balance checks (even zero-value transfers)
         all_balance_addresses = pres.union(posts)
         for address in all_balance_addresses:
             touched_addresses.add(address.lower())
 
-        # Track processed addresses for this tx
         processed_addrs = set()
         
-        # Process all balance changes - now using bytes16 format
         for address, delta_val in balance_delta.items():
-            # For reverted transactions, only include gas-related balance changes
             if tx_id in reverted_tx_indices:
                 sender, fee_recipient = identify_gas_related_addresses(block_info, tx_id)
                 
-                # Only include balance changes for:
-                # 1. The sender (who pays gas)
-                # 2. The fee recipient (who receives gas payment)
                 if address.lower() not in (sender, fee_recipient):
-                    # Skip non-gas related balance changes
                     continue
                 
             canonical = to_canonical_address(address)
-            # Calculate post balance for this address
             post_balance = post_balances.get(address, 0)
-            # Convert to bytes16 format
             post_balance_bytes = post_balance.to_bytes(16, "big", signed=False)
             builder.add_balance_change(canonical, tx_id, post_balance_bytes)
             processed_addrs.add(address.lower())
         
         processed_per_tx[tx_id] = processed_addrs
     
-    # Add addresses with temporary balance changes (zero net change)
-    # Only do this when NOT ignoring reads
     if balance_touches and not ignore_reads:
         for tx_id, touched_addrs_balances in balance_touches.items():
             processed = processed_per_tx.get(tx_id, set())
-            # Find addresses that were touched but not in the diff
             for address, balance_hex in touched_addrs_balances.items():
                 if address not in processed:
                     touched_addresses.add(address)
                     canonical = to_canonical_address(address)
-                    # Just mark as touched - no balance change since net change is zero
                     builder.add_touched_account(canonical)
 
 def extract_non_empty_code(state: dict, address: str) -> Optional[str]:
-    """Returns the code from state if it's non-empty, else None."""
     code = state.get(address, {}).get("code")
     if code and code not in ("", "0x"):
         return code
     return None
 
 def decode_hex_code(code_hex: str) -> bytes:
-    """Converts a hex code string (with or without 0x) to raw bytes."""
     code_str = code_hex[2:] if code_hex.startswith("0x") else code_hex
     return bytes.fromhex(code_str)
 
 def process_code_changes(trace_result: List[dict], builder: BALBuilder, reverted_tx_indices: set = None):
-    """Extract code changes and add them to the builder."""
     if reverted_tx_indices is None:
         reverted_tx_indices = set()
         
@@ -182,7 +147,6 @@ def process_code_changes(trace_result: List[dict], builder: BALBuilder, reverted
         if not isinstance(result, dict):
             continue
             
-        # Skip code changes for reverted transactions entirely
         if tx_id in reverted_tx_indices:
             continue
 
@@ -207,7 +171,6 @@ def process_code_changes(trace_result: List[dict], builder: BALBuilder, reverted
             builder.add_code_change(canonical, tx_id, code_bytes)
 
 def extract_reads_from_block(block_number: int, rpc_url: str) -> Dict[str, Set[str]]:
-    """Extract reads from a block using diff_mode=False."""
     trace_result = fetch_block_trace(block_number, rpc_url, diff_mode=False)
     reads = defaultdict(set)
     
@@ -221,7 +184,6 @@ def extract_reads_from_block(block_number: int, rpc_url: str) -> Dict[str, Set[s
     return reads
 
 def _is_non_write_read(pre_val_hex: Optional[str], post_val_hex: Optional[str]) -> bool:
-    """Check if a storage slot qualifies as a pure read."""
     return pre_val_hex is not None and post_val_hex is None
 
 def process_storage_changes(
@@ -231,11 +193,9 @@ def process_storage_changes(
     builder: BALBuilder = None,
     reverted_tx_indices: set = None
 ):
-    """Extract storage changes and add them to the builder."""
     if reverted_tx_indices is None:
         reverted_tx_indices = set()
         
-    # Track all writes and reads across the entire block
     block_writes: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
     block_reads: Dict[str, Set[str]] = {}
 
@@ -244,7 +204,6 @@ def process_storage_changes(
         if not isinstance(result, dict):
             continue
             
-        # Skip storage changes for reverted transactions entirely
         if tx_id in reverted_tx_indices:
             continue
 
@@ -261,41 +220,28 @@ def process_storage_changes(
                 pre_val = pre_storage.get(slot)
                 post_val = post_storage.get(slot)
 
-                # Determine if this is a write operation
-                # A write occurs when:
-                # 1. post_val exists and differs from pre_val, OR
-                # 2. pre_val exists but post_val is None (writing zero, slot omitted)
                 if post_val is not None:
-                    # Case 1: Explicit value in post state
                     pre_bytes = (
                         hex_to_bytes32(pre_val) if pre_val is not None else b"\x00" * 32
                     )
                     post_bytes = hex_to_bytes32(post_val)
                     if pre_bytes != post_bytes:
-                        # Changed write
                         block_writes.setdefault(address, {}).setdefault(slot, []).append(
                             (tx_id, post_val)
                         )
                     else:
-                        # Unchanged write - treat as read per EIP-7928
-                        # Storage writes that don't change value still consume gas
-                        # and must be included in the BAL as reads
                         if not ignore_reads:
                             if address not in block_writes or slot not in block_writes.get(address, {}):
                                 block_reads.setdefault(address, set()).add(slot)
                 elif pre_val is not None and slot not in post_storage:
-                    # Case 2: Slot was non-zero in pre but omitted in post (zeroed)
-                    # This is a write to zero, not a read!
-                    zero_value = "0x" + "00" * 32  # Proper 32-byte zero value
+                    zero_value = "0x" + "00" * 32
                     block_writes.setdefault(address, {}).setdefault(slot, []).append(
                         (tx_id, zero_value)
                     )
-                # If read-only (appears in pre but not modified in post)
                 elif not ignore_reads and _is_non_write_read(pre_val, post_val):
                     if address not in block_writes or slot not in block_writes.get(address, {}):
                         block_reads.setdefault(address, set()).add(slot)
 
-    # Add additional reads from diff_mode=False if provided and not ignoring reads
     if not ignore_reads and additional_reads is not None:
         for address, read_slots in additional_reads.items():
             if address not in block_writes:
@@ -307,7 +253,6 @@ def process_storage_changes(
                     if slot not in written_slots:
                         block_reads.setdefault(address, set()).add(slot)
 
-    # Add writes to builder - follows pattern: address -> slot -> tx_index -> new_value
     for address, slots in block_writes.items():
         canonical_addr = to_canonical_address(address)
         for slot, write_entries in slots.items():
@@ -316,7 +261,6 @@ def process_storage_changes(
                 value_bytes = hex_to_bytes32(val_hex)
                 builder.add_storage_write(canonical_addr, slot_bytes, tx_id, value_bytes)
 
-    # Add reads to builder - follows pattern: address -> slot (read-only)
     for address, read_slots in block_reads.items():
         canonical_addr = to_canonical_address(address)
         for slot in read_slots:
@@ -324,20 +268,10 @@ def process_storage_changes(
             builder.add_storage_read(canonical_addr, slot_bytes)
 
 def _get_nonce(info: dict, fallback: str = "0") -> int:
-    """Safely parse a nonce string from a state dict, with fallback."""
     nonce_str = info.get("nonce", fallback)
     return int(nonce_str, 16) if isinstance(nonce_str, str) and nonce_str.startswith('0x') else int(nonce_str)
 
 def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilder, reverted_tx_indices: set = None):
-    """Extract all nonce changes and add them to the builder.
-    
-    Captures all statically inferrable nonce changes:
-    - EOA/sender nonce increments 
-    - New contracts (nonce 1)
-    - EIP-7702 delegations
-    
-    For reverted transactions, only the sender's nonce increment is included.
-    """
     if reverted_tx_indices is None:
         reverted_tx_indices = set()
         
@@ -349,7 +283,6 @@ def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilde
         pre_state = result.get("pre", {})
         post_state = result.get("post", {})
 
-        # Process existing addresses with nonce changes
         for address_hex, pre_info in pre_state.items():
             post_info = post_state.get(address_hex, {})
             
@@ -358,23 +291,18 @@ def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilde
                 post_nonce = _get_nonce(post_info, fallback=pre_info["nonce"])
                 
                 if post_nonce > pre_nonce:
-                    # For reverted transactions, only include sender nonce change
-                    # (we can't easily identify the sender here without tx data)
                     canonical = to_canonical_address(address_hex)
                     builder.add_nonce_change(canonical, tx_index, post_nonce)
         
-        # Process new addresses that appear only in post_state (new contracts, EIP-7702)
-        # Skip these for reverted transactions
         if tx_index not in reverted_tx_indices:
             for address_hex, post_info in post_state.items():
                 if address_hex not in pre_state and "nonce" in post_info:
                     post_nonce = _get_nonce(post_info)
-                    if post_nonce > 0:  # New address with non-zero nonce
+                    if post_nonce > 0:
                         canonical = to_canonical_address(address_hex)
                         builder.add_nonce_change(canonical, tx_index, post_nonce)
 
 def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
-    """Collect all addresses that were touched during execution (including read-only access)."""
     touched = set()
     
     for tx in trace_result:
@@ -385,7 +313,6 @@ def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
         pre_state = result.get("pre", {})
         post_state = result.get("post", {})
         
-        # Any address in pre or post state was touched
         all_addresses = set(pre_state.keys()) | set(post_state.keys())
         for addr in all_addresses:
             touched.add(addr.lower())
@@ -393,22 +320,17 @@ def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
     return touched
 
 def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
-    """Sort the block access list for deterministic encoding."""
     sorted_accounts = []
     
     for account in sorted(bal.account_changes, key=lambda x: bytes(x.address)):
-        # Sort storage writes by slot and recreate with sorted changes
         sorted_storage_writes = []
         for storage_access in sorted(account.storage_writes, key=lambda x: bytes(x.slot)):
-            # Sort changes within each slot by tx_index and recreate StorageAccess
             sorted_changes = sorted(storage_access.changes, key=lambda x: x.tx_index)
             sorted_storage_access = StorageAccess(slot=storage_access.slot, changes=sorted_changes)
             sorted_storage_writes.append(sorted_storage_access)
         
-        # Sort storage reads by slot (storage_reads is now a list of StorageKey bytes)
         sorted_storage_reads = sorted(account.storage_reads, key=lambda x: bytes(x))
         
-        # Sort other changes by tx_index
         sorted_balance_changes = sorted(account.balance_changes, key=lambda x: x.tx_index)
         sorted_nonce_changes = sorted(account.nonce_changes, key=lambda x: x.tx_index)
         sorted_code_changes = sorted(account.code_changes, key=lambda x: x.tx_index)
@@ -426,9 +348,7 @@ def sort_block_access_list(bal: BlockAccessList) -> BlockAccessList:
     return BlockAccessList(account_changes=sorted_accounts)
 
 def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
-    """Calculate component sizes for BAL structure."""
     
-    # Encode each component separately to measure sizes
     storage_writes_data = []
     storage_reads_data = []
     balance_changes_data = []
@@ -447,7 +367,6 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
         if account.code_changes:
             code_changes_data.extend(account.code_changes)
     
-    # Calculate compressed sizes
     storage_writes_size = get_compressed_size(
         ssz.encode(storage_writes_data, sedes=SSZList(StorageAccess, MAX_SLOTS))
     ) if storage_writes_data else 0
@@ -468,7 +387,6 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
         ssz.encode(code_changes_data, sedes=SSZList(CodeChange, MAX_TXS))
     ) if code_changes_data else 0
     
-    # Total storage size combines writes and reads
     total_storage_size = storage_writes_size + storage_reads_size
     total_size = total_storage_size + balance_size + code_size + nonce_size
     
@@ -485,13 +403,11 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
 def main():
     global IGNORE_STORAGE_LOCATIONS
     
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks using latest EIP-7928 format')
     parser.add_argument('--no-reads', action='store_true', 
                         help='Ignore storage read locations (only include writes)')
     args = parser.parse_args()
     
-    # Set IGNORE_STORAGE_LOCATIONS based on command line flag
     IGNORE_STORAGE_LOCATIONS = args.no_reads
     
     print(f"Running EIP-7928 SSZ BAL builder with IGNORE_STORAGE_LOCATIONS = {IGNORE_STORAGE_LOCATIONS}")
@@ -499,24 +415,20 @@ def main():
     block_totals = []
     data = []
 
-    # Use 50 blocks for comparison testing (every 10th block from recent range)
-    random_blocks = range(22616032 - 500, 22616032, 10)
+    random_blocks = range(22886914 - 500, 22886914, 10)
 
     for block_number in random_blocks:
         print(f"Processing block {block_number}...")
         trace_result = fetch_block_trace(block_number, RPC_URL)
         
-        # Fetch reads separately only if not ignoring storage locations
         block_reads = None
         if not IGNORE_STORAGE_LOCATIONS:
             print(f"  Fetching reads for block {block_number}...")
             block_reads = extract_reads_from_block(block_number, RPC_URL)
 
-        # Fetch balance touches to capture temporary balance changes
         print(f"  Fetching balance touches for block {block_number}...")
         balance_touches = extract_balance_touches_from_block(block_number, RPC_URL)
         
-        # Fetch transaction receipts to identify reverted transactions
         print(f"  Fetching transaction receipts for block {block_number}...")
         receipts = fetch_block_receipts(block_number, RPC_URL)
         reverted_tx_indices = set()
@@ -526,44 +438,34 @@ def main():
         if reverted_tx_indices:
             print(f"    Found {len(reverted_tx_indices)} reverted transactions: {sorted(reverted_tx_indices)}")
             
-        # Fetch block info for transaction details (needed for reverted tx handling)
         block_info = None
         if reverted_tx_indices:
             print(f"  Fetching block info for reverted transaction handling...")
             block_info = fetch_block_info(block_number, RPC_URL)
 
-        # Create builder - follows address->field->tx_index->change pattern
         builder = BALBuilder()
         
-        # Collect all touched addresses
         touched_addresses = collect_touched_addresses(trace_result)
         
-        # Extract all components into the builder
         process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder, reverted_tx_indices)
         process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, IGNORE_STORAGE_LOCATIONS)
         process_code_changes(trace_result, builder, reverted_tx_indices)
         process_nonce_changes(trace_result, builder, reverted_tx_indices)
         
-        # Add any touched addresses that don't already have changes
-        # Only include touched addresses when NOT ignoring reads (per EIP-7928)
-        # This ensures that with --no-reads, the BAL only contains addresses with actual changes
         if not IGNORE_STORAGE_LOCATIONS:
             for addr in touched_addresses:
                 canonical = to_canonical_address(addr)
                 builder.add_touched_account(canonical)
         
-        # Build the block access list
         block_obj = builder.build(ignore_reads=IGNORE_STORAGE_LOCATIONS)
         block_obj_sorted = sort_block_access_list(block_obj)
         
-        # Encode the entire block
         full_block_encoded = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
 
-        # Create bal_raw/ssz directory 
+ 
         bal_raw_dir = os.path.join(project_root, "bal_raw", "ssz")
         os.makedirs(bal_raw_dir, exist_ok=True)
         
-        # Create filename indicating with/without reads
         reads_suffix = "without_reads" if IGNORE_STORAGE_LOCATIONS else "with_reads"
         filename = f"{block_number}_block_access_list_{reads_suffix}_eip7928.txt"
         filepath = os.path.join(bal_raw_dir, filename)
@@ -571,16 +473,12 @@ def main():
         with open(filepath, "wb") as f:
             f.write(full_block_encoded)
 
-        # Calculate component sizes
         component_sizes = get_component_sizes(block_obj_sorted)
 
-        # Count affected accounts and slots from original trace for comparison
         accs, slots = count_accounts_and_slots(trace_result)
         
-        # Get BAL stats
         bal_stats = get_account_stats(block_obj_sorted)
 
-        # Store stats
         data.append({
             "block_number": block_number,
             "sizes": component_sizes,
@@ -591,7 +489,6 @@ def main():
             "bal_stats": bal_stats,
         })
 
-        # Totals for averages
         totals["storage_writes"].append(component_sizes["storage_writes_kb"])
         totals["storage_reads"].append(component_sizes["storage_reads_kb"])
         totals["storage_total"].append(component_sizes["storage_total_kb"])
@@ -600,13 +497,11 @@ def main():
         totals["nonce"].append(component_sizes["nonce_diffs_kb"])
         block_totals.append(component_sizes["total_kb"])
 
-    # Save JSON to file with appropriate name based on reads flag
     filename = "bal_analysis_without_reads_eip7928.json" if IGNORE_STORAGE_LOCATIONS else "bal_analysis_with_reads_eip7928.json"
     filepath = os.path.join(project_root, "bal_raw", "ssz", filename)
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
 
-    # Averages
     print("\nAverage compressed size per component (in KiB):")
     for name, sizes in totals.items():
         avg = sum(sizes) / len(sizes) if sizes else 0
@@ -615,7 +510,6 @@ def main():
     overall_avg = sum(block_totals) / len(block_totals) if block_totals else 0
     print(f"\nOverall average compressed size per block: {overall_avg:.2f} KiB")
     
-    # Show efficiency stats
     if data:
         avg_accounts = sum(d["bal_stats"]["total_accounts"] for d in data) / len(data)
         avg_storage_writes = sum(d["bal_stats"]["total_storage_writes"] for d in data) / len(data)
