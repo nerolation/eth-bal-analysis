@@ -11,9 +11,10 @@ Block Access Lists provide a structured way to represent storage accesses, balan
 - **Full EIP-7928 compliance** with both standard and optimized variants
 - **Dual encoding support**: SSZ (Ethereum 2.0 standard) and RLP (Ethereum 1.0 standard)
 - **Comprehensive size analysis** with raw and snappy-compressed comparisons  
-- **Extensive testing framework** with unit, integration, and compliance tests
+- **Optimized simple ETH transfer detection** using gas-based method with batch RPC calls
 - **Real block validation** against actual Ethereum mainnet blocks
-- **Performance optimization** with separate read/write storage tracking  
+- **Performance optimization** with separate read/write storage tracking
+- **Builder pattern architecture** for flexible BAL construction  
 
 ## Setup
 
@@ -28,62 +29,79 @@ echo "YOUR_RPC_URL" > rpc.txt
 
 ## Usage
 
-### Quick Size Comparison
+### Generate BALs with Current Implementation
 
 ```bash
-# Run a quick SSZ vs RLP comparison on a single block
-python examples/quick_comparison.py --block 22616000
+# Generate SSZ BALs without storage reads
+python src/bal_builder.py --no-reads
 
-# Run comprehensive analysis across multiple blocks
-python analysis/encoding_comparison.py --num-blocks 5
+# Generate SSZ BALs with storage reads (default)
+python src/bal_builder.py
+
+# Generate RLP BALs without storage reads
+python src/bal_builder_rlp.py --no-reads
+
+# Generate RLP BALs with storage reads (default)
+python src/bal_builder_rlp.py
+
+# Create comprehensive analysis report
+python create_analysis_report.py
 ```
 
-### SSZ Implementation (Standard)
+### SSZ Implementation (Builder Pattern)
 
 ```python
 from src.bal_builder import *
 from src.BALs import *
+from src.helpers import *
 
-# Generate SSZ BAL for a block
-trace_result = fetch_block_trace(18000000, rpc_url)
-storage_diff, account_access_list = get_storage_diff_from_block(trace_result)
-balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result)
-code_diff, acc_code_diffs = get_code_diff_from_block(trace_result)
-nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(trace_result)
+# Fetch block data
+block_number = 22616000
+trace_result = fetch_block_trace(block_number, RPC_URL)
 
-# Build and sort BAL
-block_obj = BlockAccessList(
-    account_accesses=account_access_list,
-    balance_diffs=acc_bal_diffs,
-    code_diffs=acc_code_diffs,
-    nonce_diffs=account_nonce_list,
-)
-sorted_bal = sort_block_access_list(block_obj)
-encoded_bal = ssz.encode(sorted_bal, sedes=BlockAccessList)
+# Create builder and process components
+builder = BALBuilder()
+touched_addresses = collect_touched_addresses(trace_result)
+simple_transfers = identify_simple_eth_transfers(block_number, RPC_URL)
+
+# Extract all components into the builder
+process_storage_changes(trace_result, None, ignore_reads=True, builder=builder)
+process_balance_changes(trace_result, builder, touched_addresses, simple_transfers)
+process_code_changes(trace_result, builder)
+process_nonce_changes(trace_result, builder)
+
+# Build and encode BAL
+block_obj = builder.build(ignore_reads=True)
+block_obj_sorted = sort_block_access_list(block_obj)
+encoded_bal = ssz.encode(block_obj_sorted, sedes=BlockAccessList)
 ```
 
-### RLP Implementation (Standard)
+### RLP Implementation (Builder Pattern)
 
 ```python
 from src.bal_builder_rlp import *
 from src.BALs_rlp import *
+from src.helpers import *
 
-# Generate RLP BAL for a block (identical data, different encoding)
-trace_result = fetch_block_trace(18000000, rpc_url)
-storage_diff, account_access_list = get_storage_diff_from_block(trace_result)
-balance_diff, acc_bal_diffs = get_balance_diff_from_block(trace_result)
-code_diff, acc_code_diffs = get_code_diff_from_block(trace_result)
-nonce_diff, account_nonce_list = build_contract_nonce_diffs_from_state(trace_result)
+# Fetch block data (identical process)
+block_number = 22616000
+trace_result = fetch_block_trace(block_number, RPC_URL)
 
-# Build and sort BAL
-block_obj = BlockAccessListRLP(
-    account_accesses=account_access_list,
-    balance_diffs=acc_bal_diffs,
-    code_diffs=acc_code_diffs,
-    nonce_diffs=account_nonce_list,
-)
-sorted_bal = sort_block_access_list(block_obj)
-encoded_bal = rlp.encode(sorted_bal)
+# Create builder and process components
+builder = BALBuilder()
+touched_addresses = collect_touched_addresses(trace_result)
+simple_transfers = identify_simple_eth_transfers(block_number, RPC_URL)
+
+# Extract all components into the builder
+process_storage_changes(trace_result, None, ignore_reads=True, builder=builder)
+process_balance_changes(trace_result, builder, touched_addresses, simple_transfers)
+process_code_changes(trace_result, builder)
+process_nonce_changes(trace_result, builder)
+
+# Build and encode BAL (RLP encoding)
+block_obj = builder.build(ignore_reads=True)
+block_obj_sorted = sort_block_access_list(block_obj)
+encoded_bal = rlp.encode(block_obj_sorted)
 ```
 
 ### Size Analysis
@@ -114,9 +132,15 @@ python edge_case_tests.py
 ## Components
 
 - `src/BALs.py` - EIP-7928 data structures with SSZ serialization
-- `src/bal_builder.py` - Main logic for building Block Access Lists  
-- `src/helpers.py` - RPC and utility functions
+- `src/BALs_rlp.py` - EIP-7928 data structures with RLP serialization
+- `src/bal_builder.py` - SSZ BAL builder with optimized simple transfer detection
+- `src/bal_builder_rlp.py` - RLP BAL builder with identical logic, different encoding
+- `src/helpers.py` - RPC utilities, size analysis, and gas-based simple transfer detection
 - `tests/` - Comprehensive test suite
+- `reports/` - Analysis reports comparing encoding formats and read strategies
+- `bal_raw/` - Generated BAL files and analysis data
+  - `ssz/` - SSZ-encoded BALs and analysis results
+  - `rlp/` - RLP-encoded BALs and analysis results
 
 ## License
 

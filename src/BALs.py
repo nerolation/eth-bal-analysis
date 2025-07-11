@@ -5,6 +5,10 @@ from typing import Dict, List as PyList, Optional, Tuple
 from ssz import Serializable
 from ssz.sedes import ByteVector, ByteList, uint16, uint32, uint64, uint128, List as SSZList
 
+# Patch ByteList to fix the attribute error
+if not hasattr(ByteList, 'length'):
+    ByteList.length = property(lambda self: self.max_length)
+
 # Constants; chosen to support a 630m block gas limit
 MAX_TXS = 30_000
 MAX_SLOTS = 300_000

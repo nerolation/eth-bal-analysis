@@ -31,6 +31,42 @@ def get_tracer_payload(block_number_hex, diff_mode=True):
     }
 
 
+def fetch_block_info(block_number: int, rpc_url: str) -> dict:
+    """Fetch block information including transaction receipts"""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": [hex(block_number), True],
+        "id": 1
+    }
+    
+    response = requests.post(rpc_url, json=payload)
+    response.raise_for_status()
+    
+    result = response.json()
+    if "error" in result:
+        raise Exception(f"RPC error: {result['error']}")
+    
+    return result.get("result", {})
+
+def fetch_block_receipts(block_number: int, rpc_url: str) -> dict:
+    """Fetch block information including transaction receipts"""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockReceipts",
+        "params": [hex(block_number)],
+        "id": 1
+    }
+    
+    response = requests.post(rpc_url, json=payload)
+    response.raise_for_status()
+    
+    result = response.json()
+    if "error" in result:
+        raise Exception(f"RPC error: {result['error']}")
+    
+    return result.get("result", {})
+
 def fetch_block_trace(block_number, rpc_url, diff_mode=True):
     block_number_hex = hex(block_number)
     payload = get_tracer_payload(block_number_hex, diff_mode)

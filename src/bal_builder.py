@@ -14,6 +14,7 @@ sys.path.insert(0, src_dir)
 
 from BALs import *
 from helpers import *
+from helpers import fetch_block_info
 
 rpc_file = os.path.join(project_root, "rpc.txt")
 with open(rpc_file, "r") as file:
@@ -43,14 +44,68 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
             balance_delta[addr] = delta
     return balance_delta
 
-def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses: set):
+def extract_balance_touches_from_block(block_number: int, rpc_url: str) -> Dict[int, Dict[str, str]]:
+    """Extract all addresses that had balance reads/writes using diff_mode=False.
+    
+    Returns:
+        Dict mapping tx_index to dict of address -> balance value
+    """
+    trace_result = fetch_block_trace(block_number, rpc_url, diff_mode=False)
+    balance_touches = {}
+    
+    for tx_id, tx_trace in enumerate(trace_result):
+        result = tx_trace.get("result", {})
+        touched_addrs = {}
+        for address, acc_data in result.items():
+            if "balance" in acc_data:
+                touched_addrs[address.lower()] = acc_data["balance"]
+        if touched_addrs:
+            balance_touches[tx_id] = touched_addrs
+    
+    return balance_touches
+
+def identify_gas_related_addresses(block_info: dict, tx_index: int) -> Tuple[Optional[str], Optional[str]]:
+    """Identify the sender and fee recipient for a transaction.
+    
+    Returns:
+        Tuple of (sender_address, fee_recipient_address)
+    """
+    if not block_info or "transactions" not in block_info:
+        return None, None
+        
+    transactions = block_info.get("transactions", [])
+    if tx_index >= len(transactions):
+        return None, None
+        
+    tx = transactions[tx_index]
+    sender = tx.get("from", "").lower() if tx.get("from") else None
+    
+    # Fee recipient is the block's miner/fee recipient
+    fee_recipient = block_info.get("miner", "").lower() if block_info.get("miner") else None
+    
+    return sender, fee_recipient
+
+def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses: set, 
+                          balance_touches: Dict[int, Dict[str, str]] = None, 
+                          reverted_tx_indices: set = None,
+                          block_info: dict = None,
+                          ignore_reads: bool = False):
     """Extract balance changes and add them to the builder.
     
     Args:
-        trace_result: The trace result from debug_traceBlockByNumber
+        trace_result: The trace result from debug_traceBlockByNumber (diff mode)
         builder: The BALBuilder instance
         touched_addresses: Set to track all touched addresses
+        balance_touches: Dict of tx_id -> set of addresses that had balance touches (from non-diff trace)
+        reverted_tx_indices: Set of transaction indices that were reverted
+        block_info: Block information including transactions (for identifying senders)
     """
+    if reverted_tx_indices is None:
+        reverted_tx_indices = set()
+        
+    # Track which addresses have been processed per transaction
+    processed_per_tx = {}
+    
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
@@ -66,14 +121,44 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
         for address in all_balance_addresses:
             touched_addresses.add(address.lower())
 
+        # Track processed addresses for this tx
+        processed_addrs = set()
+        
         # Process all balance changes - now using bytes16 format
         for address, delta_val in balance_delta.items():
+            # For reverted transactions, only include gas-related balance changes
+            if tx_id in reverted_tx_indices:
+                sender, fee_recipient = identify_gas_related_addresses(block_info, tx_id)
+                
+                # Only include balance changes for:
+                # 1. The sender (who pays gas)
+                # 2. The fee recipient (who receives gas payment)
+                if address.lower() not in (sender, fee_recipient):
+                    # Skip non-gas related balance changes
+                    continue
+                
             canonical = to_canonical_address(address)
             # Calculate post balance for this address
             post_balance = post_balances.get(address, 0)
             # Convert to bytes16 format
             post_balance_bytes = post_balance.to_bytes(16, "big", signed=False)
             builder.add_balance_change(canonical, tx_id, post_balance_bytes)
+            processed_addrs.add(address.lower())
+        
+        processed_per_tx[tx_id] = processed_addrs
+    
+    # Add addresses with temporary balance changes (zero net change)
+    # Only do this when NOT ignoring reads
+    if balance_touches and not ignore_reads:
+        for tx_id, touched_addrs_balances in balance_touches.items():
+            processed = processed_per_tx.get(tx_id, set())
+            # Find addresses that were touched but not in the diff
+            for address, balance_hex in touched_addrs_balances.items():
+                if address not in processed:
+                    touched_addresses.add(address)
+                    canonical = to_canonical_address(address)
+                    # Just mark as touched - no balance change since net change is zero
+                    builder.add_touched_account(canonical)
 
 def extract_non_empty_code(state: dict, address: str) -> Optional[str]:
     """Returns the code from state if it's non-empty, else None."""
@@ -87,11 +172,18 @@ def decode_hex_code(code_hex: str) -> bytes:
     code_str = code_hex[2:] if code_hex.startswith("0x") else code_hex
     return bytes.fromhex(code_str)
 
-def process_code_changes(trace_result: List[dict], builder: BALBuilder):
+def process_code_changes(trace_result: List[dict], builder: BALBuilder, reverted_tx_indices: set = None):
     """Extract code changes and add them to the builder."""
+    if reverted_tx_indices is None:
+        reverted_tx_indices = set()
+        
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
+            continue
+            
+        # Skip code changes for reverted transactions entirely
+        if tx_id in reverted_tx_indices:
             continue
 
         pre_state, post_state = result.get("pre", {}), result.get("post", {})
@@ -136,9 +228,13 @@ def process_storage_changes(
     trace_result: List[dict], 
     additional_reads: Optional[Dict[str, Set[str]]] = None,
     ignore_reads: bool = IGNORE_STORAGE_LOCATIONS,
-    builder: BALBuilder = None
+    builder: BALBuilder = None,
+    reverted_tx_indices: set = None
 ):
     """Extract storage changes and add them to the builder."""
+    if reverted_tx_indices is None:
+        reverted_tx_indices = set()
+        
     # Track all writes and reads across the entire block
     block_writes: Dict[str, Dict[str, List[Tuple[int, str]]]] = {}
     block_reads: Dict[str, Set[str]] = {}
@@ -146,6 +242,10 @@ def process_storage_changes(
     for tx_id, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
+            continue
+            
+        # Skip storage changes for reverted transactions entirely
+        if tx_id in reverted_tx_indices:
             continue
 
         pre_state = result.get("pre", {})
@@ -228,14 +328,19 @@ def _get_nonce(info: dict, fallback: str = "0") -> int:
     nonce_str = info.get("nonce", fallback)
     return int(nonce_str, 16) if isinstance(nonce_str, str) and nonce_str.startswith('0x') else int(nonce_str)
 
-def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilder):
+def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilder, reverted_tx_indices: set = None):
     """Extract all nonce changes and add them to the builder.
     
     Captures all statically inferrable nonce changes:
     - EOA/sender nonce increments 
     - New contracts (nonce 1)
     - EIP-7702 delegations
+    
+    For reverted transactions, only the sender's nonce increment is included.
     """
+    if reverted_tx_indices is None:
+        reverted_tx_indices = set()
+        
     for tx_index, tx in enumerate(trace_result):
         result = tx.get("result")
         if not isinstance(result, dict):
@@ -253,16 +358,20 @@ def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilde
                 post_nonce = _get_nonce(post_info, fallback=pre_info["nonce"])
                 
                 if post_nonce > pre_nonce:
+                    # For reverted transactions, only include sender nonce change
+                    # (we can't easily identify the sender here without tx data)
                     canonical = to_canonical_address(address_hex)
                     builder.add_nonce_change(canonical, tx_index, post_nonce)
         
         # Process new addresses that appear only in post_state (new contracts, EIP-7702)
-        for address_hex, post_info in post_state.items():
-            if address_hex not in pre_state and "nonce" in post_info:
-                post_nonce = _get_nonce(post_info)
-                if post_nonce > 0:  # New address with non-zero nonce
-                    canonical = to_canonical_address(address_hex)
-                    builder.add_nonce_change(canonical, tx_index, post_nonce)
+        # Skip these for reverted transactions
+        if tx_index not in reverted_tx_indices:
+            for address_hex, post_info in post_state.items():
+                if address_hex not in pre_state and "nonce" in post_info:
+                    post_nonce = _get_nonce(post_info)
+                    if post_nonce > 0:  # New address with non-zero nonce
+                        canonical = to_canonical_address(address_hex)
+                        builder.add_nonce_change(canonical, tx_index, post_nonce)
 
 def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
     """Collect all addresses that were touched during execution (including read-only access)."""
@@ -403,6 +512,26 @@ def main():
             print(f"  Fetching reads for block {block_number}...")
             block_reads = extract_reads_from_block(block_number, RPC_URL)
 
+        # Fetch balance touches to capture temporary balance changes
+        print(f"  Fetching balance touches for block {block_number}...")
+        balance_touches = extract_balance_touches_from_block(block_number, RPC_URL)
+        
+        # Fetch transaction receipts to identify reverted transactions
+        print(f"  Fetching transaction receipts for block {block_number}...")
+        receipts = fetch_block_receipts(block_number, RPC_URL)
+        reverted_tx_indices = set()
+        for i, receipt in enumerate(receipts):
+            if receipt and receipt.get("status") == "0x0":
+                reverted_tx_indices.add(i)
+        if reverted_tx_indices:
+            print(f"    Found {len(reverted_tx_indices)} reverted transactions: {sorted(reverted_tx_indices)}")
+            
+        # Fetch block info for transaction details (needed for reverted tx handling)
+        block_info = None
+        if reverted_tx_indices:
+            print(f"  Fetching block info for reverted transaction handling...")
+            block_info = fetch_block_info(block_number, RPC_URL)
+
         # Create builder - follows address->field->tx_index->change pattern
         builder = BALBuilder()
         
@@ -410,13 +539,14 @@ def main():
         touched_addresses = collect_touched_addresses(trace_result)
         
         # Extract all components into the builder
-        process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder)
-        process_balance_changes(trace_result, builder, touched_addresses)
-        process_code_changes(trace_result, builder)
-        process_nonce_changes(trace_result, builder)
+        process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder, reverted_tx_indices)
+        process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, IGNORE_STORAGE_LOCATIONS)
+        process_code_changes(trace_result, builder, reverted_tx_indices)
+        process_nonce_changes(trace_result, builder, reverted_tx_indices)
         
         # Add any touched addresses that don't already have changes
         # Only include touched addresses when NOT ignoring reads (per EIP-7928)
+        # This ensures that with --no-reads, the BAL only contains addresses with actual changes
         if not IGNORE_STORAGE_LOCATIONS:
             for addr in touched_addresses:
                 canonical = to_canonical_address(addr)
