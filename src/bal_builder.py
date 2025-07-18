@@ -374,24 +374,21 @@ def process_nonce_changes(trace_result: List[Dict[str, Any]], builder: BALBuilde
         pre_state = result.get("pre", {})
         post_state = result.get("post", {})
 
-        for address_hex, pre_info in pre_state.items():
+        # Process all addresses that appear in either pre or post state
+        all_addresses = set(pre_state.keys()) | set(post_state.keys())
+        
+        for address_hex in all_addresses:
+            pre_info = pre_state.get(address_hex, {})
             post_info = post_state.get(address_hex, {})
             
-            if "nonce" in pre_info:
-                pre_nonce = _get_nonce(pre_info)
-                post_nonce = _get_nonce(post_info, fallback=pre_info["nonce"])
-                
-                if post_nonce > pre_nonce:
-                    canonical = to_canonical_address(address_hex)
-                    builder.add_nonce_change(canonical, tx_index, post_nonce)
-        
-        if tx_index not in reverted_tx_indices:
-            for address_hex, post_info in post_state.items():
-                if address_hex not in pre_state and "nonce" in post_info:
-                    post_nonce = _get_nonce(post_info)
-                    if post_nonce > 0:
-                        canonical = to_canonical_address(address_hex)
-                        builder.add_nonce_change(canonical, tx_index, post_nonce)
+            # Get pre and post nonces (defaulting to 0 if not present)
+            pre_nonce = _get_nonce(pre_info, fallback="0") if pre_info else 0
+            post_nonce = _get_nonce(post_info, fallback="0") if post_info else 0
+            
+            # Add nonce change if it increased
+            if post_nonce > pre_nonce:
+                canonical = to_canonical_address(address_hex)
+                builder.add_nonce_change(canonical, tx_index, post_nonce)
 
 def collect_touched_addresses(trace_result: List[dict]) -> Set[str]:
     touched = set()
