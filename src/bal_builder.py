@@ -43,6 +43,30 @@ def get_balance_delta(pres, posts, pre_balances, post_balances):
             balance_delta[addr] = delta
     return balance_delta
 
+def get_balance_delta_with_touches(pres, posts, pre_balances, post_balances, balance_touches_for_tx=None):
+    """Calculate balance deltas using balance_touches to get accurate pre-balances.
+    
+    This function corrects for the diffMode=true limitation where addresses with
+    balance reads but no changes are omitted from the pre-state.
+    """
+    all_addresses = pres.union(posts)
+    balance_delta = {}
+    
+    for addr in all_addresses:
+        # Check if we have a more accurate pre-balance from balance_touches
+        if balance_touches_for_tx and addr in balance_touches_for_tx and addr not in pres:
+            # Address was touched but not in pre-state due to diffMode=true
+            # Use the balance from diffMode=false as the accurate pre-balance
+            pre_balance = parse_hex_or_zero(balance_touches_for_tx[addr])
+        else:
+            pre_balance = pre_balances.get(addr, 0)
+            
+        post_balance = post_balances.get(addr, pre_balance)
+        delta = post_balance - pre_balance
+        if delta != 0:  # Include all non-zero deltas (positive and negative)
+            balance_delta[addr] = delta
+    return balance_delta
+
 def extract_balance_touches_from_block(block_number: int, rpc_url: str) -> Dict[int, Dict[str, str]]:
     """Extract all addresses that had balance reads/writes using diff_mode=False.
     
@@ -82,6 +106,7 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
                           balance_touches: Dict[int, Dict[str, str]] = None, 
                           reverted_tx_indices: set = None,
                           block_info: dict = None,
+                          receipts: List[dict] = None,
                           ignore_reads: bool = False):
     if reverted_tx_indices is None:
         reverted_tx_indices = set()
@@ -93,29 +118,95 @@ def process_balance_changes(trace_result, builder: BALBuilder, touched_addresses
         if not isinstance(result, dict):
             continue
 
-        pre_state, post_state = tx["result"]["pre"], tx["result"]["post"]
-        pre_balances, post_balances = parse_pre_and_post_balances(pre_state, post_state)
-        pres, posts = set(pre_balances.keys()), set(post_balances.keys())
-        balance_delta = get_balance_delta(pres, posts, pre_balances, post_balances)
-
-        all_balance_addresses = pres.union(posts)
-        for address in all_balance_addresses:
-            touched_addresses.add(address.lower())
-
-        processed_addrs = set()
-        
-        for address, delta_val in balance_delta.items():
-            if tx_id in reverted_tx_indices:
-                sender, fee_recipient = identify_gas_related_addresses(block_info, tx_id)
+        if tx_id in reverted_tx_indices:
+            # For reverted transactions, calculate gas fee from receipt with EIP-1559 support
+            if receipts and tx_id < len(receipts) and block_info and tx_id < len(block_info.get("transactions", [])):
+                receipt = receipts[tx_id]
+                tx_info = block_info["transactions"][tx_id]
                 
-                if address.lower() not in (sender, fee_recipient):
-                    continue
+                # Calculate gas fee components
+                gas_used = int(receipt.get("gasUsed", "0x0"), 16)
                 
-            canonical = to_canonical_address(address)
-            post_balance = post_balances.get(address, 0)
-            post_balance_bytes = post_balance.to_bytes(16, "big", signed=False)
-            builder.add_balance_change(canonical, tx_id, post_balance_bytes)
-            processed_addrs.add(address.lower())
+                # Get effective gas price
+                if "effectiveGasPrice" in receipt:
+                    effective_gas_price = int(receipt["effectiveGasPrice"], 16)
+                elif "gasPrice" in tx_info:
+                    effective_gas_price = int(tx_info["gasPrice"], 16)
+                else:
+                    effective_gas_price = 0
+                
+                # Get base fee for EIP-1559
+                base_fee_per_gas = int(block_info.get("baseFeePerGas", "0x0"), 16)
+                
+                # Calculate fees
+                total_gas_fee = gas_used * effective_gas_price
+                
+                # For EIP-1559 transactions, only priority fee goes to miner
+                if base_fee_per_gas > 0:
+                    priority_fee_per_gas = effective_gas_price - base_fee_per_gas
+                    priority_fee_total = gas_used * priority_fee_per_gas
+                else:
+                    # Pre-EIP-1559, all gas fee goes to miner
+                    priority_fee_total = total_gas_fee
+                
+                # Get addresses
+                sender = tx_info.get("from", "").lower()
+                fee_recipient = block_info.get("miner", "").lower()
+                
+                # Get accurate pre-balances from balance touches
+                balance_touches_for_tx = balance_touches.get(tx_id, {}) if balance_touches else {}
+                
+                # Calculate post-balances
+                sender_pre = parse_hex_or_zero(balance_touches_for_tx.get(sender, "0x0"))
+                fee_recipient_pre = parse_hex_or_zero(balance_touches_for_tx.get(fee_recipient, "0x0"))
+                
+                # Sender pays full gas fee
+                sender_post = sender_pre - total_gas_fee
+                # Fee recipient only gets priority fee (base fee is burned)
+                fee_recipient_post = fee_recipient_pre + priority_fee_total
+                
+                # Add balance changes
+                sender_canonical = to_canonical_address(sender)
+                sender_post_bytes = sender_post.to_bytes(16, "big", signed=False)
+                builder.add_balance_change(sender_canonical, tx_id, sender_post_bytes)
+                
+                fee_recipient_canonical = to_canonical_address(fee_recipient)
+                fee_recipient_post_bytes = fee_recipient_post.to_bytes(16, "big", signed=False)
+                builder.add_balance_change(fee_recipient_canonical, tx_id, fee_recipient_post_bytes)
+                
+                touched_addresses.add(sender)
+                touched_addresses.add(fee_recipient)
+                processed_addrs = {sender, fee_recipient}
+            else:
+                processed_addrs = set()
+        else:
+            # Normal (non-reverted) transaction processing
+            pre_state, post_state = tx["result"]["pre"], tx["result"]["post"]
+            pre_balances, post_balances = parse_pre_and_post_balances(pre_state, post_state)
+            pres, posts = set(pre_balances.keys()), set(post_balances.keys())
+            
+            # Get balance touches for this specific transaction to fix diffMode=true issues
+            balance_touches_for_tx = balance_touches.get(tx_id, {}) if balance_touches else {}
+            
+            # Use the enhanced delta calculation that accounts for missing pre-states
+            balance_delta = get_balance_delta_with_touches(pres, posts, pre_balances, post_balances, balance_touches_for_tx)
+            
+            # Also add addresses from balance_touches to ensure they're tracked
+            if balance_touches_for_tx:
+                posts.update(balance_touches_for_tx.keys())
+
+            all_balance_addresses = pres.union(posts)
+            for address in all_balance_addresses:
+                touched_addresses.add(address.lower())
+
+            processed_addrs = set()
+            
+            for address, delta_val in balance_delta.items():
+                canonical = to_canonical_address(address)
+                post_balance = post_balances.get(address, 0)
+                post_balance_bytes = post_balance.to_bytes(16, "big", signed=False)
+                builder.add_balance_change(canonical, tx_id, post_balance_bytes)
+                processed_addrs.add(address.lower())
         
         processed_per_tx[tx_id] = processed_addrs
     
@@ -415,7 +506,7 @@ def main():
     block_totals = []
     data = []
 
-    random_blocks = range(22886914 - 500, 22886914, 10)
+    random_blocks = range(20615532, 20616032, 10)
 
     for block_number in random_blocks:
         print(f"Processing block {block_number}...")
@@ -438,17 +529,15 @@ def main():
         if reverted_tx_indices:
             print(f"    Found {len(reverted_tx_indices)} reverted transactions: {sorted(reverted_tx_indices)}")
             
-        block_info = None
-        if reverted_tx_indices:
-            print(f"  Fetching block info for reverted transaction handling...")
-            block_info = fetch_block_info(block_number, RPC_URL)
+        print(f"  Fetching block info...")
+        block_info = fetch_block_info(block_number, RPC_URL)
 
         builder = BALBuilder()
         
         touched_addresses = collect_touched_addresses(trace_result)
         
         process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder, reverted_tx_indices)
-        process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, IGNORE_STORAGE_LOCATIONS)
+        process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, receipts, IGNORE_STORAGE_LOCATIONS)
         process_code_changes(trace_result, builder, reverted_tx_indices)
         process_nonce_changes(trace_result, builder, reverted_tx_indices)
         

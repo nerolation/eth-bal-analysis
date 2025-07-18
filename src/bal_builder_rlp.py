@@ -188,17 +188,15 @@ def main():
         if reverted_tx_indices:
             print(f"    Found {len(reverted_tx_indices)} reverted transactions: {sorted(reverted_tx_indices)}")
             
-        block_info = None
-        if reverted_tx_indices:
-            print(f"  Fetching block info for reverted transaction handling...")
-            block_info = fetch_block_info(block_number, RPC_URL)
+        print(f"  Fetching block info...")
+        block_info = fetch_block_info(block_number, RPC_URL)
 
         builder = BALBuilder()
         
         touched_addresses = collect_touched_addresses(trace_result)
         
         process_storage_changes(trace_result, block_reads, IGNORE_STORAGE_LOCATIONS, builder, reverted_tx_indices)
-        process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, IGNORE_STORAGE_LOCATIONS)
+        process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, receipts, IGNORE_STORAGE_LOCATIONS)
         process_code_changes(trace_result, builder, reverted_tx_indices)
         process_nonce_changes(trace_result, builder, reverted_tx_indices)
         
