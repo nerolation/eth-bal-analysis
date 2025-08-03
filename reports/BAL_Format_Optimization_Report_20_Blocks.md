@@ -54,34 +54,149 @@ class BlockAccessListColumnar(Serializable):
 ### Optimized Format Structure
 
 ```python
+# Constants
+MAX_TXS = 30_000
+MAX_SLOTS = 300_000
+MAX_ACCOUNTS = 300_000
+MAX_CODE_SIZE = 24_576
+MAX_STORAGE_CHANGES = MAX_SLOTS * 10
+MAX_BALANCE_CHANGES = MAX_ACCOUNTS * 10
+MAX_NONCE_CHANGES = MAX_ACCOUNTS * 10
+MAX_CODE_CHANGES = 1000
+MAX_VARINT_BYTES = 3
+MAX_CHANGES_PER_ACCOUNT = 1000
+
+# Type aliases
+Address = ByteVector(20)
+StorageKey = ByteVector(32)
+TxIndex = uint16
+Balance = uint128
+Nonce = uint64
+DictIndex = uint8
+Bytes32 = ByteVector(32)
+
+def parse_hex_or_zero(x):
+    if pd.isna(x) or x is None:
+        return 0
+    return int(x, 16)
+
+# Encoding utilities
+def encode_varint(value: int) -> bytes:
+    """Encode an integer as a variable-length byte sequence."""
+    if value < 128:
+        return bytes([value])
+    elif value < 16384:
+        return bytes([0x80 | (value & 0x7F), value >> 7])
+    else:
+        # For larger values, ensure each byte is in valid range
+        b1 = 0x80 | (value & 0x7F)
+        b2 = 0x80 | ((value >> 7) & 0x7F)
+        b3 = (value >> 14) & 0xFF  # Ensure it's within byte range
+        return bytes([b1, b2, b3])
+
+def decode_varint(data: bytes) -> Tuple[int, int]:
+    """Decode a variable-length integer. Returns (value, bytes_consumed)."""
+    value = 0
+    shift = 0
+    for i, byte in enumerate(data):
+        value |= (byte & 0x7F) << shift
+        if byte & 0x80 == 0:
+            return value, i + 1
+        shift += 7
+    raise ValueError("Invalid varint encoding")
+
+def zigzag_encode(value: int) -> int:
+    """Encode signed integer using ZigZag encoding."""
+    if value >= 0:
+        return value << 1
+    else:
+        return ((-value) << 1) - 1
+
+def zigzag_decode(value: int) -> int:
+    """Decode ZigZag encoded integer."""
+    return (value >> 1) if (value & 1) == 0 else -((value + 1) >> 1)
+
+def encode_delta_varint(value: int) -> bytes:
+    """Encode a signed delta as ZigZag + VarInt."""
+    return encode_varint(zigzag_encode(value))
+
+def count_leading_zeros(data: bytes) -> int:
+    """Count leading zero bytes."""
+    for i, byte in enumerate(data):
+        if byte != 0:
+            return i
+    return len(data)
+
+# SSZ structures
+
+class VarInt(Serializable):
+    fields = [
+        ('bytes', SSZList(uint8, MAX_VARINT_BYTES))
+    ]
+
+class DeltaVarInt(Serializable):
+    fields = [
+        ('bytes', SSZList(uint8, MAX_VARINT_BYTES))
+    ]
+
+class CompressedValue(Serializable):
+    fields = [
+        ('is_dict', boolean),
+        ('dict_index', DictIndex),
+        ('literal', Bytes32)
+    ]
+
+class TrimmedBalance(Serializable):
+    fields = [
+        ('header', uint8),
+        ('bytes', SSZVector(uint8, 32))
+    ]
+
+class DeltaIndexList(Serializable):
+    fields = [
+        ('first', TxIndex),
+        ('deltas', SSZList(DeltaVarInt, MAX_CHANGES_PER_ACCOUNT))
+    ]
+
+class CompressedSlot(Serializable):
+    fields = [
+        ('slot_key', StorageKey),
+        ('count', VarInt),
+        ('tx_indices', DeltaIndexList),
+        ('values', SSZList(CompressedValue, MAX_TXS))
+    ]
+
+# Account flags type - 4 bits per account
+AccountFlags = Bitvector(MAX_ACCOUNTS * 4)
+
 class OptimizedBlockAccessList(Serializable):
     fields = [
         # Header
-        ('encoding_flags', uint8),  # Which optimizations are used
-        ('dict_size', uint8),       # Number of dictionary entries
+        ('encoding_flags', uint8),
+        ('dict_size', uint8),
         
         # Dictionary
-        ('dictionary_values', SSZList(Bytes32, 256)),
+        ('dictionary_values', SSZList(Bytes32, 255)),
         
-        # Accounts with bitvector flags
+        # Accounts
         ('addresses', SSZList(Address, MAX_ACCOUNTS)),
-        ('account_flags', Bitvector[MAX_ACCOUNTS * 4]),  # 4 bits per account
+        ('account_flags', AccountFlags),
         
-        # Storage writes with compression
+        # Storage writes
         ('total_slots', VarInt),
         ('slots', SSZList(CompressedSlot, MAX_SLOTS)),
         
-        # Balance writes with trimming
+        # Balance writes
         ('total_balance_changes', VarInt),
         ('balance_accounts', DeltaIndexList),
         ('balances', SSZList(TrimmedBalance, MAX_BALANCE_CHANGES)),
         
-        # Nonce writes with VarInt
+        # Nonce writes
         ('total_nonce_changes', VarInt),
         ('nonce_accounts', DeltaIndexList),
         ('nonces', SSZList(VarInt, MAX_NONCE_CHANGES)),
         
-        # Transaction indices with delta encoding
+        # Transaction indexes
         ('total_tx_indices', VarInt),
         ('tx_index_list', DeltaIndexList),
         
