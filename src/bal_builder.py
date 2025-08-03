@@ -3,6 +3,7 @@ import ssz
 import sys
 import json
 import argparse
+import requests
 from pathlib import Path
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -21,6 +22,11 @@ with open(rpc_file, "r") as file:
     RPC_URL = file.read().strip()
 
 IGNORE_STORAGE_LOCATIONS = False
+
+# System contract addresses (EIP-7928)
+BEACON_ROOT_CONTRACT = "0x000F3df6D732807Ef1319fB7B8bB8522d0Beac02"  # EIP-4788
+HISTORY_CONTRACT = "0x0000F90827F1C53a10cb7A02335B175320002935"  # EIP-2935
+HISTORY_BUFFER_LENGTH = 8191  # For beacon root storage
 
 def extract_balances(state):
     balances = {}
@@ -488,12 +494,109 @@ def get_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
         'total_kb': total_size,
     }
 
+def process_system_contract_changes(block_info: dict, builder: BALBuilder, tx_count: int):
+    """
+    Process system contract state changes according to EIP-7928.
+    These are recorded with tx_index = len(transactions).
+    """
+    system_tx_index = tx_count
+    
+    # 1. Process withdrawals as balance changes
+    withdrawals = block_info.get('withdrawals', [])
+    if withdrawals:
+        print(f"  Processing {len(withdrawals)} withdrawals at tx_index {system_tx_index}...")
+        
+        # Get withdrawal addresses
+        withdrawal_addresses = list(set(w['address'].lower() for w in withdrawals))
+        
+        # Check which addresses are already in the BAL and get their latest balance
+        existing_balances = {}
+        parent_block_balances = {}
+        
+        # First, check the builder for existing balance changes
+        temp_bal = builder.build(ignore_reads=True)
+        for account in temp_bal.account_changes:
+            addr_hex = '0x' + account.address.hex()
+            if addr_hex in withdrawal_addresses and account.balance_changes:
+                # Get the latest balance change (highest tx_index)
+                latest_change = max(account.balance_changes, key=lambda x: x.tx_index)
+                existing_balances[addr_hex] = int.from_bytes(latest_change.post_balance, 'big')
+        
+        # For addresses not in BAL, fetch from parent block
+        for addr in withdrawal_addresses:
+            if addr not in existing_balances:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "method": "eth_getBalance",
+                    "params": [addr, hex(int(block_info.get('number', '0x0'), 16) - 1)],
+                    "id": 1
+                }
+                response = requests.post(RPC_URL, json=payload)
+                result = response.json()
+                if 'result' in result:
+                    parent_block_balances[addr] = int(result['result'], 16)
+                else:
+                    parent_block_balances[addr] = 0
+        
+        # Process each withdrawal
+        for withdrawal in withdrawals:
+            address = withdrawal['address'].lower()
+            amount_gwei = int(withdrawal['amount'], 16)
+            amount_wei = amount_gwei * 10**9
+            
+            # Get the pre-balance from either BAL or parent block
+            if address in existing_balances:
+                pre_balance = existing_balances[address]
+                print(f"    Using balance from BAL for {address}: {pre_balance}")
+            else:
+                pre_balance = parent_block_balances.get(address, 0)
+                print(f"    Using balance from parent block for {address}: {pre_balance}")
+            
+            # Calculate post-balance = pre-balance + withdrawal amount
+            post_balance = pre_balance + amount_wei
+            
+            # Get canonical address
+            canonical_addr = to_canonical_address(address)
+            
+            # Add balance change with actual post-balance
+            post_balance_bytes = post_balance.to_bytes(16, "big", signed=False)
+            builder.add_balance_change(canonical_addr, system_tx_index, post_balance_bytes)
+    
+    # 2. Process beacon block root (EIP-4788)
+    parent_beacon_root = block_info.get('parentBeaconBlockRoot')
+    if parent_beacon_root:
+        print(f"  Processing beacon root at tx_index {system_tx_index}...")
+        timestamp = int(block_info.get('timestamp', '0x0'), 16)
+        contract_addr = to_canonical_address(BEACON_ROOT_CONTRACT)
+        
+        # Calculate storage slot for the root
+        slot_index = timestamp % HISTORY_BUFFER_LENGTH
+        slot_bytes = slot_index.to_bytes(32, 'big')
+        
+        # Store beacon root only (not timestamp - that's done by the contract itself)
+        value_bytes = bytes.fromhex(parent_beacon_root[2:] if parent_beacon_root.startswith('0x') else parent_beacon_root)
+        builder.add_storage_write(contract_addr, slot_bytes, system_tx_index, value_bytes)
+    
+    # 3. Process parent block hash (EIP-2935)
+    parent_hash = block_info.get('parentHash')
+    block_number = int(block_info.get('number', '0x0'), 16)
+    if parent_hash and block_number > 0:
+        print(f"  Processing parent hash at tx_index {system_tx_index}...")
+        contract_addr = to_canonical_address(HISTORY_CONTRACT)
+        
+        # Store parent hash at slot = parent block number
+        parent_number = block_number - 1
+        slot_bytes = parent_number.to_bytes(32, 'big')
+        value_bytes = bytes.fromhex(parent_hash[2:] if parent_hash.startswith('0x') else parent_hash)
+        builder.add_storage_write(contract_addr, slot_bytes, system_tx_index, value_bytes)
+
 def main():
     global IGNORE_STORAGE_LOCATIONS
     
     parser = argparse.ArgumentParser(description='Build Block Access Lists (BALs) from Ethereum blocks using latest EIP-7928 format')
     parser.add_argument('--no-reads', action='store_true', 
                         help='Ignore storage read locations (only include writes)')
+    parser.add_argument('--block', type=int, help='Process a single block number')
     args = parser.parse_args()
     
     IGNORE_STORAGE_LOCATIONS = args.no_reads
@@ -503,7 +606,10 @@ def main():
     block_totals = []
     data = []
 
-    random_blocks = range(20615532, 20616032, 10)
+    if args.block:
+        random_blocks = [args.block]
+    else:
+        random_blocks = range(20615532, 20615562, 10)
 
     for block_number in random_blocks:
         print(f"Processing block {block_number}...")
@@ -537,6 +643,10 @@ def main():
         process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, receipts, IGNORE_STORAGE_LOCATIONS)
         process_code_changes(trace_result, builder, reverted_tx_indices)
         process_nonce_changes(trace_result, builder, reverted_tx_indices)
+        
+        # Process system contract changes with tx_index = len(transactions)
+        tx_count = len(block_info.get('transactions', []))
+        process_system_contract_changes(block_info, builder, tx_count)
         
         if not IGNORE_STORAGE_LOCATIONS:
             for addr in touched_addresses:

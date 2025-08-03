@@ -3,6 +3,7 @@ import rlp
 import sys
 import json
 import argparse
+import requests
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict
@@ -33,7 +34,8 @@ from bal_builder import (
     collect_touched_addresses,
     sort_block_access_list,
     get_component_sizes,
-    count_accounts_and_slots
+    count_accounts_and_slots,
+    process_system_contract_changes
 )
 
 rpc_file = os.path.join(project_root, "rpc.txt")
@@ -87,6 +89,10 @@ def encode_bal_to_rlp(bal: BlockAccessList) -> bytes:
         accounts_data.append(account_data)
     
     return rlp.encode(accounts_data)
+
+def get_rlp_compressed_size(data: bytes) -> float:
+    """Get compressed size of RLP data in KB."""
+    return get_compressed_size(data)
 
 def get_rlp_component_sizes(bal: BlockAccessList) -> Dict[str, float]:
     
@@ -199,6 +205,10 @@ def main():
         process_balance_changes(trace_result, builder, touched_addresses, balance_touches, reverted_tx_indices, block_info, receipts, IGNORE_STORAGE_LOCATIONS)
         process_code_changes(trace_result, builder, reverted_tx_indices)
         process_nonce_changes(trace_result, builder, reverted_tx_indices)
+        
+        # Process system contract changes with tx_index = len(transactions)
+        tx_count = len(block_info.get('transactions', []))
+        process_system_contract_changes(block_info, builder, tx_count)
         
         if not IGNORE_STORAGE_LOCATIONS:
             for addr in touched_addresses:
