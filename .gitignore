@@ -179,6 +179,23 @@ secrets.json
 .vscode/
 rpc.txt
 
+# Venv at repo root
+/bin/
+/share/
+/include/
+/lib64
+/pyvenv.cfg
+
+# Build logs and bulk run outputs
+/tmp_*
+reports/*.png
+reports/bal_vs_block_sizes.json
+reports/bal_range_manifest.jsonl
+reports/bal_range_manifest.failures.txt
+
+# Generated BAL files for newly built blocks (legacy committed ones still tracked)
+bal_raw/rlp/*.rlp
+
 # Test results and debug files
 *.json
 debug_*.py
